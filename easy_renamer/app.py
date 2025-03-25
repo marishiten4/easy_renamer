@@ -3,6 +3,9 @@ import streamlit as st
 from PIL import Image
 import piexif  # メタデータ読み取り用
 
+# Streamlitの設定
+st.set_page_config(page_title="画像リネームツール", page_icon=":camera:")
+
 class FileRenamer:
     def __init__(self):
         # 初期設定
@@ -16,43 +19,28 @@ class FileRenamer:
 
     def select_folder(self):
         """フォルダ選択機能"""
-        self.selected_folder = st.text_input('画像フォルダのパスを入力', '')
-        if self.selected_folder and os.path.exists(self.selected_folder):
+        # Renderの制限により、一時的にハードコードされたパスを使用
+        self.selected_folder = '/tmp'  # 一時フォルダを使用
+        try:
             self.image_files = [f for f in os.listdir(self.selected_folder) 
                                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
             st.success(f'{len(self.image_files)}個の画像が見つかりました')
+        except Exception as e:
+            st.error(f'フォルダ読み取りエラー: {e}')
 
     def extract_metadata(self, image_path):
         """画像メタデータから情報を抽出"""
         try:
             img = Image.open(image_path)
             exif = img._getexif()
-            # ここに具体的なメタデータ解析ロジックを実装
             return exif
         except Exception as e:
             st.error(f'メタデータ読み取りエラー: {e}')
             return None
 
-    def generate_rename_candidates(self):
-        """メタデータから候補ワードを生成"""
-        if not self.selected_folder:
-            st.warning('フォルダを先に選択してください')
-            return
-
-        # サンプル実装
-        for image_file in self.image_files:
-            full_path = os.path.join(self.selected_folder, image_file)
-            metadata = self.extract_metadata(full_path)
-            # メタデータ解析ロジックを追加
-            # 候補ワードの生成
-
     def rename_files(self, new_names):
         """ファイルリネーム処理"""
-        for old_name, new_name in zip(self.image_files, new_names):
-            old_path = os.path.join(self.selected_folder, old_name)
-            new_path = os.path.join(self.selected_folder, new_name)
-            os.rename(old_path, new_path)
-        st.success('ファイルリネームが完了しました')
+        st.warning('実際のファイルリネームは無効化されています。')
 
 def main():
     st.title('画像リネームツール - Yahoo オークション出品用')
@@ -72,7 +60,10 @@ def main():
         # 選択画像の表示
         if selected_image:
             image_path = os.path.join(renamer.selected_folder, selected_image)
-            st.image(image_path, caption=selected_image)
+            try:
+                st.image(image_path, caption=selected_image)
+            except Exception as e:
+                st.error(f'画像表示エラー: {e}')
     
     # リネーム処理
     st.header('リネーム設定')
@@ -80,7 +71,7 @@ def main():
     
     if st.button('リネーム実行'):
         if new_names:
-            renamer.rename_files(new_names.split('\n'))
+            st.warning('本番環境での実際のファイルリネームは無効化されています。')
         else:
             st.warning('リネーム名を入力してください')
 
