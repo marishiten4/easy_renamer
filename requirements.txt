@@ -1,2 +1,6 @@
 PyQt6==6.5.0
 Pillow==9.5.0
+pip
+setuptools
+wheel
+
