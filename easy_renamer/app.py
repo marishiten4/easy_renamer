@@ -1,25 +1,79 @@
 import os
+import json
 import streamlit as st
-from PIL import Image
+from PIL import Image, ExifTags
 import piexif
-import tempfile
-import shutil
 
-class FileRenamer:
+class WordManager:
     def __init__(self):
+        # ワードデータの永続化のためjsonファイルを使用
+        self.config_file = 'word_config.json'
+        self.load_words()
+
+    def load_words(self):
+        """設定ファイルからワードをロード"""
+        try:
+            with open(self.config_file, 'r', encoding='utf-8') as f:
+                self.word_config = json.load(f)
+        except FileNotFoundError:
+            self.word_config = {
+                'big_words': ['キャラクター名', 'ポーズ', '衣装'],
+                'small_words': ['可愛い', '綺麗', 'セクシー'],
+                'matching_words': ['少女', '美少女', 'アニメ']
+            }
+            self.save_words()
+
+    def save_words(self):
+        """ワード設定をjsonファイルに保存"""
+        with open(self.config_file, 'w', encoding='utf-8') as f:
+            json.dump(self.word_config, f, ensure_ascii=False, indent=2)
+
+    def add_word(self, category, word):
+        """新しいワードを追加"""
+        if word not in self.word_config[category]:
+            self.word_config[category].append(word)
+            self.save_words()
+
+class MetadataExtractor:
+    @staticmethod
+    def extract_stable_diffusion_prompt(image_path):
+        """Stable Diffusionのメタデータからプロンプトを抽出"""
+        try:
+            img = Image.open(image_path)
+            
+            # Pillowでメタデータ取得
+            exif = img._getexif()
+            if exif:
+                for tag_id, value in exif.items():
+                    tag = ExifTags.TAGS.get(tag_id, tag_id)
+                    if tag == 'UserComment':
+                        return value.decode('utf-8')
+            
+            # PILで取得できない場合はpiexifを使用
+            exif_dict = piexif.load(image_path)
+            user_comment = exif_dict.get('Exif', {}).get(piexif.ExifIFD.UserComment)
+            
+            if user_comment:
+                return user_comment.decode('utf-8')
+        
+        except Exception as e:
+            st.warning(f"メタデータ抽出エラー: {e}")
+        
+        return ""
+
+class ImageRenamer:
+    def __init__(self):
+        self.word_manager = WordManager()
+        self.metadata_extractor = MetadataExtractor()
+        
         # セッション状態の初期化
-        if 'selected_folder' not in st.session_state:
-            st.session_state.selected_folder = None
-        if 'image_files' not in st.session_state:
-            st.session_state.image_files = []
+        if 'uploaded_files' not in st.session_state:
+            st.session_state.uploaded_files = []
+        if 'selected_image_index' not in st.session_state:
+            st.session_state.selected_image_index = 0
 
-        self.preset_words = {
-            'big_words': ['キャラクター名', 'ポーズ', '衣装'],
-            'small_words': ['可愛い', '綺麗', 'セクシー']
-        }
-
-    def upload_folder(self):
-        """フォルダアップロード機能"""
+    def upload_images(self):
+        """画像アップロード"""
         uploaded_files = st.file_uploader(
             "画像ファイルをアップロード", 
             type=['png', 'jpg', 'jpeg'], 
@@ -27,108 +81,86 @@ class FileRenamer:
         )
 
         if uploaded_files:
-            # 一時フォルダの作成
-            temp_dir = tempfile.mkdtemp()
-            st.session_state.selected_folder = temp_dir
-            st.session_state.image_files = []
+            st.session_state.uploaded_files = uploaded_files
+            st.session_state.selected_image_index = 0
 
-            # ファイルを一時フォルダに保存
-            for uploaded_file in uploaded_files:
-                file_path = os.path.join(temp_dir, uploaded_file.name)
-                with open(file_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                st.session_state.image_files.append(uploaded_file.name)
+    def display_image_grid(self):
+        """画像グリッド表示とクリック選択"""
+        if st.session_state.uploaded_files:
+            cols = st.columns(4)
+            for i, uploaded_file in enumerate(st.session_state.uploaded_files):
+                col = cols[i % 4]
+                with col:
+                    if st.button(f"画像{i+1}", key=f"img_select_{i}"):
+                        st.session_state.selected_image_index = i
 
-            st.success(f'{len(st.session_state.image_files)}個の画像をアップロードしました')
-            return True
-        return False
+            # 選択された画像の詳細表示
+            selected_file = st.session_state.uploaded_files[st.session_state.selected_image_index]
+            st.subheader(f"選択画像: {selected_file.name}")
+            st.image(selected_file, caption=selected_file.name, use_column_width=True)
 
-    def display_image_list(self):
-        """画像一覧の表示"""
-        if st.session_state.image_files:
-            # 画像選択
-            selected_image = st.selectbox('画像を選択', st.session_state.image_files)
+            # メタデータ抽出
+            self.analyze_image_metadata(selected_file)
+
+    def analyze_image_metadata(self, uploaded_file):
+        """画像メタデータ分析と候補ワード抽出"""
+        # 一時的に画像を保存
+        with open(uploaded_file.name, 'wb') as f:
+            f.write(uploaded_file.getvalue())
+
+        prompt = self.metadata_extractor.extract_stable_diffusion_prompt(uploaded_file.name)
+        
+        if prompt:
+            st.subheader("抽出されたプロンプト")
+            st.text(prompt)
+
+            # マッチングワードの検索
+            matching_words = [
+                word for word in self.word_manager.word_config['matching_words'] 
+                if word in prompt
+            ]
+
+            if matching_words:
+                st.subheader("検出されたキーワード")
+                for word in matching_words:
+                    st.success(f"マッチ: {word}")
+
+    def word_selection_area(self):
+        """ワード選択・登録エリア"""
+        st.sidebar.header("ワード管理")
+        
+        # ワード追加機能
+        with st.sidebar.expander("新規ワード追加"):
+            new_word = st.text_input("追加するワード")
+            word_category = st.selectbox("カテゴリ", 
+                ['big_words', 'small_words', 'matching_words'])
             
-            # 選択画像の表示
-            if selected_image:
-                image_path = os.path.join(st.session_state.selected_folder, selected_image)
-                try:
-                    st.image(image_path, caption=selected_image)
-                except Exception as e:
-                    st.error(f'画像表示エラー: {e}')
+            if st.button("ワード追加"):
+                if new_word:
+                    self.word_manager.add_word(word_category, new_word)
+                    st.success(f"{new_word}を{word_category}に追加しました")
 
-    def generate_rename_preview(self):
-        """リネーム候補の生成と表示"""
-        # 定型文セクション
-        st.subheader('定型文設定')
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            big_word = st.selectbox('大分類ワード', self.preset_words['big_words'])
-        
-        with col2:
-            small_word = st.selectbox('小分類ワード', self.preset_words['small_words'])
-        
-        # 画像番号入力
-        image_number = st.number_input('画像番号', min_value=1, value=1)
-        
-        # リネーム候補の生成
-        rename_template = f"{big_word}_{small_word}_{image_number:03d}"
-        
-        st.subheader('リネーム プレビュー')
-        st.text_input('生成された名前', rename_template)
-
-    def rename_files(self, rename_template):
-        """ファイルリネーム処理"""
-        if not st.session_state.selected_folder:
-            st.error('先に画像をアップロードしてください')
-            return
-
-        try:
-            for i, filename in enumerate(st.session_state.image_files, 1):
-                # ファイル拡張子の取得
-                ext = os.path.splitext(filename)[1]
-                
-                # 新しいファイル名の生成
-                new_filename = f"{rename_template}{ext}"
-                
-                # ファイルリネーム
-                old_path = os.path.join(st.session_state.selected_folder, filename)
-                new_path = os.path.join(st.session_state.selected_folder, new_filename)
-                
-                os.rename(old_path, new_path)
-                st.session_state.image_files[i-1] = new_filename
-
-            st.success('ファイルリネームが完了しました')
-            
-            # リネーム後の画像一覧を表示
-            st.subheader('リネーム後の画像一覧')
-            st.write(st.session_state.image_files)
-
-        except Exception as e:
-            st.error(f'リネーム中にエラーが発生: {e}')
+        # 既存ワードの表示
+        st.sidebar.subheader("登録ワード")
+        for category, words in self.word_manager.word_config.items():
+            st.sidebar.write(f"{category}:")
+            st.sidebar.write(", ".join(words))
 
 def main():
     st.set_page_config(page_title="画像リネームツール", page_icon=":camera:")
-    st.title('画像リネームツール - Yahoo オークション出品用')
+    st.title('画像リネームツール - メタデータ解析版')
     
-    renamer = FileRenamer()
+    renamer = ImageRenamer()
     
-    # サイドバー
-    st.sidebar.header('操作')
+    # ワード選択エリア
+    renamer.word_selection_area()
     
-    # フォルダアップロード
-    if renamer.upload_folder():
-        # 画像一覧表示
-        renamer.display_image_list()
-        
-        # リネーム候補生成
-        renamer.generate_rename_preview()
-        
-        # リネーム実行ボタン
-        if st.button('リネーム実行'):
-            rename_template = f"{st.session_state.big_word}_{st.session_state.small_word}_{st.session_state.image_number:03d}"
-            renamer.rename_files(rename_template)
+    # 画像アップロード
+    renamer.upload_images()
+    
+    # 画像グリッド表示
+    if st.session_state.uploaded_files:
+        renamer.display_image_grid()
 
 if __name__ == '__main__':
     main()
