@@ -1,15 +1,19 @@
 import os
 import streamlit as st
 from PIL import Image
-import piexif  # メタデータ読み取り用
+import piexif
+import sys
+
+# ポート設定
+port = int(os.environ.get('PORT', 8501))
 
 # Streamlitの設定
 st.set_page_config(page_title="画像リネームツール", page_icon=":camera:")
 
 class FileRenamer:
     def __init__(self):
-        # 初期設定
-        self.selected_folder = None
+        # 以前のコードと同じ
+        self.selected_folder = '/tmp'
         self.image_files = []
         self.preset_words = {
             'big_words': ['キャラクター名', 'ポーズ', '衣装'],
@@ -19,8 +23,6 @@ class FileRenamer:
 
     def select_folder(self):
         """フォルダ選択機能"""
-        # Renderの制限により、一時的にハードコードされたパスを使用
-        self.selected_folder = '/tmp'  # 一時フォルダを使用
         try:
             self.image_files = [f for f in os.listdir(self.selected_folder) 
                                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
@@ -44,6 +46,8 @@ class FileRenamer:
 
 def main():
     st.title('画像リネームツール - Yahoo オークション出品用')
+    
+    st.write(f"アプリケーションポート: {port}")
     
     renamer = FileRenamer()
     
@@ -76,4 +80,6 @@ def main():
             st.warning('リネーム名を入力してください')
 
 if __name__ == '__main__':
+    # ポート情報を出力
+    print(f"Starting Streamlit app on port {port}")
     main()
