@@ -2,84 +2,133 @@ import os
 import streamlit as st
 from PIL import Image
 import piexif
-import sys
-
-# ポート設定
-port = int(os.environ.get('PORT', 8501))
-
-# Streamlitの設定
-st.set_page_config(page_title="画像リネームツール", page_icon=":camera:")
+import tempfile
+import shutil
 
 class FileRenamer:
     def __init__(self):
-        # 以前のコードと同じ
-        self.selected_folder = '/tmp'
-        self.image_files = []
+        # セッション状態の初期化
+        if 'selected_folder' not in st.session_state:
+            st.session_state.selected_folder = None
+        if 'image_files' not in st.session_state:
+            st.session_state.image_files = []
+
         self.preset_words = {
             'big_words': ['キャラクター名', 'ポーズ', '衣装'],
             'small_words': ['可愛い', '綺麗', 'セクシー']
         }
-        self.candidate_words = []
 
-    def select_folder(self):
-        """フォルダ選択機能"""
-        try:
-            self.image_files = [f for f in os.listdir(self.selected_folder) 
-                                if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-            st.success(f'{len(self.image_files)}個の画像が見つかりました')
-        except Exception as e:
-            st.error(f'フォルダ読み取りエラー: {e}')
+    def upload_folder(self):
+        """フォルダアップロード機能"""
+        uploaded_files = st.file_uploader(
+            "画像ファイルをアップロード", 
+            type=['png', 'jpg', 'jpeg'], 
+            accept_multiple_files=True
+        )
 
-    def extract_metadata(self, image_path):
-        """画像メタデータから情報を抽出"""
-        try:
-            img = Image.open(image_path)
-            exif = img._getexif()
-            return exif
-        except Exception as e:
-            st.error(f'メタデータ読み取りエラー: {e}')
-            return None
+        if uploaded_files:
+            # 一時フォルダの作成
+            temp_dir = tempfile.mkdtemp()
+            st.session_state.selected_folder = temp_dir
+            st.session_state.image_files = []
 
-    def rename_files(self, new_names):
+            # ファイルを一時フォルダに保存
+            for uploaded_file in uploaded_files:
+                file_path = os.path.join(temp_dir, uploaded_file.name)
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                st.session_state.image_files.append(uploaded_file.name)
+
+            st.success(f'{len(st.session_state.image_files)}個の画像をアップロードしました')
+            return True
+        return False
+
+    def display_image_list(self):
+        """画像一覧の表示"""
+        if st.session_state.image_files:
+            # 画像選択
+            selected_image = st.selectbox('画像を選択', st.session_state.image_files)
+            
+            # 選択画像の表示
+            if selected_image:
+                image_path = os.path.join(st.session_state.selected_folder, selected_image)
+                try:
+                    st.image(image_path, caption=selected_image)
+                except Exception as e:
+                    st.error(f'画像表示エラー: {e}')
+
+    def generate_rename_preview(self):
+        """リネーム候補の生成と表示"""
+        # 定型文セクション
+        st.subheader('定型文設定')
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            big_word = st.selectbox('大分類ワード', self.preset_words['big_words'])
+        
+        with col2:
+            small_word = st.selectbox('小分類ワード', self.preset_words['small_words'])
+        
+        # 画像番号入力
+        image_number = st.number_input('画像番号', min_value=1, value=1)
+        
+        # リネーム候補の生成
+        rename_template = f"{big_word}_{small_word}_{image_number:03d}"
+        
+        st.subheader('リネーム プレビュー')
+        st.text_input('生成された名前', rename_template)
+
+    def rename_files(self, rename_template):
         """ファイルリネーム処理"""
-        st.warning('実際のファイルリネームは無効化されています。')
+        if not st.session_state.selected_folder:
+            st.error('先に画像をアップロードしてください')
+            return
+
+        try:
+            for i, filename in enumerate(st.session_state.image_files, 1):
+                # ファイル拡張子の取得
+                ext = os.path.splitext(filename)[1]
+                
+                # 新しいファイル名の生成
+                new_filename = f"{rename_template}{ext}"
+                
+                # ファイルリネーム
+                old_path = os.path.join(st.session_state.selected_folder, filename)
+                new_path = os.path.join(st.session_state.selected_folder, new_filename)
+                
+                os.rename(old_path, new_path)
+                st.session_state.image_files[i-1] = new_filename
+
+            st.success('ファイルリネームが完了しました')
+            
+            # リネーム後の画像一覧を表示
+            st.subheader('リネーム後の画像一覧')
+            st.write(st.session_state.image_files)
+
+        except Exception as e:
+            st.error(f'リネーム中にエラーが発生: {e}')
 
 def main():
+    st.set_page_config(page_title="画像リネームツール", page_icon=":camera:")
     st.title('画像リネームツール - Yahoo オークション出品用')
-    
-    st.write(f"アプリケーションポート: {port}")
     
     renamer = FileRenamer()
     
     # サイドバー
-    st.sidebar.header('設定')
+    st.sidebar.header('操作')
     
-    # フォルダ選択
-    renamer.select_folder()
-    
-    # 画像一覧表示
-    if renamer.image_files:
-        selected_image = st.selectbox('画像を選択', renamer.image_files)
+    # フォルダアップロード
+    if renamer.upload_folder():
+        # 画像一覧表示
+        renamer.display_image_list()
         
-        # 選択画像の表示
-        if selected_image:
-            image_path = os.path.join(renamer.selected_folder, selected_image)
-            try:
-                st.image(image_path, caption=selected_image)
-            except Exception as e:
-                st.error(f'画像表示エラー: {e}')
-    
-    # リネーム処理
-    st.header('リネーム設定')
-    new_names = st.text_area('新しいファイル名', '')
-    
-    if st.button('リネーム実行'):
-        if new_names:
-            st.warning('本番環境での実際のファイルリネームは無効化されています。')
-        else:
-            st.warning('リネーム名を入力してください')
+        # リネーム候補生成
+        renamer.generate_rename_preview()
+        
+        # リネーム実行ボタン
+        if st.button('リネーム実行'):
+            rename_template = f"{st.session_state.big_word}_{st.session_state.small_word}_{st.session_state.image_number:03d}"
+            renamer.rename_files(rename_template)
 
 if __name__ == '__main__':
-    # ポート情報を出力
-    print(f"Starting Streamlit app on port {port}")
     main()
