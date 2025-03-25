@@ -1,0 +1,11 @@
+{
+    "default_folder": "",
+    "max_filename_length": 255,
+    "allowed_extensions": [
+        ".jpg",
+        ".jpeg", 
+        ".png", 
+        ".webp"
+    ],
+    "backup_folder": "backup"
+}
