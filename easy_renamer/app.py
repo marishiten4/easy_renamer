@@ -1,232 +1,256 @@
 import os
-import sys
-import json
+import streamlit as st
 from PIL import Image
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QListWidget, QLabel, QLineEdit, QPushButton, QFileDialog, 
-                             QTextEdit, QMessageBox, QGridLayout, QScrollArea)
-from PyQt5.QtGui import QPixmap, QImage
-from PyQt5.QtCore import Qt
+from PIL.ExifTags import TAGS
+import json
+import re
 
-class EasyRenamer(QMainWindow):
+class EasyRenamer:
     def __init__(self):
-        super().__init__()
-        self.initUI()
-        self.current_images = []
-        self.current_page = 0
-        self.images_per_page = 50
-        self.metadata_keywords = self.load_keywords()
+        # セッション状態の初期化
+        if 'settings' not in st.session_state:
+            self.load_settings()
+        
+        # メタデータ解析用キーワード
+        self.metadata_keywords = self.load_metadata_keywords()
 
-    def initUI(self):
-        self.setWindowTitle('Easy Renamer')
-        self.setGeometry(100, 100, 1200, 800)
-
-        # メインウィジェットとレイアウト
-        main_widget = QWidget()
-        main_layout = QHBoxLayout()
-        
-        # 左側レイアウト（画像リスト）
-        left_layout = QVBoxLayout()
-        
-        # 画像リストウィジェット
-        self.image_list = QListWidget()
-        self.image_list.itemClicked.connect(self.display_selected_image)
-        left_layout.addWidget(self.image_list)
-        
-        # ページ送りボタン
-        page_layout = QHBoxLayout()
-        self.prev_page_btn = QPushButton('前のページ')
-        self.next_page_btn = QPushButton('次のページ')
-        self.prev_page_btn.clicked.connect(self.prev_page)
-        self.next_page_btn.clicked.connect(self.next_page)
-        page_layout.addWidget(self.prev_page_btn)
-        page_layout.addWidget(self.next_page_btn)
-        left_layout.addLayout(page_layout)
-
-        # 中央レイアウト（画像表示とリネーム）
-        center_layout = QVBoxLayout()
-        
-        # 選択画像表示
-        self.image_display = QLabel()
-        self.image_display.setFixedSize(400, 400)
-        self.image_display.setAlignment(Qt.AlignCenter)
-        center_layout.addWidget(self.image_display)
-        
-        # リネーム入力エリア
-        self.rename_input = QLineEdit()
-        center_layout.addWidget(self.rename_input)
-        
-        # 右側レイアウト（メタデータと設定）
-        right_layout = QVBoxLayout()
-        
-        # メタデータ候補エリア
-        self.metadata_list = QListWidget()
-        self.metadata_list.itemDoubleClicked.connect(self.insert_metadata_keyword)
-        right_layout.addWidget(QLabel('メタデータ候補:'))
-        right_layout.addWidget(self.metadata_list)
-        
-        # 定型文・検索ワード入力
-        self.template_input = QLineEdit()
-        right_layout.addWidget(QLabel('定型文:'))
-        right_layout.addWidget(self.template_input)
-        
-        # フォルダ選択ボタン
-        select_folder_btn = QPushButton('フォルダ選択')
-        select_folder_btn.clicked.connect(self.select_folder)
-        right_layout.addWidget(select_folder_btn)
-        
-        # リネームボタン
-        rename_btn = QPushButton('リネーム')
-        rename_btn.clicked.connect(self.rename_files)
-        right_layout.addWidget(rename_btn)
-
-        # レイアウト組み立て
-        main_layout.addLayout(left_layout, 1)
-        main_layout.addLayout(center_layout, 1)
-        main_layout.addLayout(right_layout, 1)
-        
-        main_widget.setLayout(main_layout)
-        self.setCentralWidget(main_widget)
-
-    def load_keywords(self):
-        # キーワード読み込み（JSONファイルから）
+    def load_settings(self):
+        """設定ファイルの読み込み"""
         try:
-            with open('keywords.json', 'r', encoding='utf-8') as f:
-                return json.load(f)
+            with open('settings.json', 'r', encoding='utf-8') as f:
+                st.session_state.settings = json.load(f)
         except FileNotFoundError:
-            return {}
+            st.session_state.settings = {
+                'template_texts': ['出品画像', 'カードゲーム用', 'コレクション'],
+                'big_words': ['キャラクター', '美少女', 'アニメ'],
+                'small_words': ['可愛い', '人気', '高品質'],
+                'registered_words': []
+            }
 
-    def select_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(self, 'フォルダ選択')
-        if folder_path:
-            self.load_images(folder_path)
+    def load_metadata_keywords(self):
+        """メタデータ解析用キーワードの読み込み"""
+        return {
+            'characters': ['初音ミク', '鏡音リン', '巡音ルカ'],
+            'styles': ['アニメ調', 'イラスト', 'リアル'],
+            'emotions': ['笑顔', '真剣', '困り顔'],
+            'poses': ['立ち絵', '全身', 'バストアップ']
+        }
 
-    def load_images(self, folder_path):
-        # 画像読み込み
-        image_extensions = ['.png', '.jpg', '.jpeg', '.webp']
-        self.current_images = [
-            os.path.join(folder_path, f) 
-            for f in os.listdir(folder_path) 
-            if os.path.splitext(f)[1].lower() in image_extensions
-        ]
-        self.current_page = 0
-        self.update_image_list()
-
-    def update_image_list(self):
-        # 画像リスト更新
-        self.image_list.clear()
-        start = self.current_page * self.images_per_page
-        end = start + self.images_per_page
-        page_images = self.current_images[start:end]
-        
-        for img_path in page_images:
-            self.image_list.addItem(os.path.basename(img_path))
-        
-        # ページ送りボタン制御
-        self.prev_page_btn.setEnabled(self.current_page > 0)
-        self.next_page_btn.setEnabled(end < len(self.current_images))
-
-    def display_selected_image(self, item):
-        # 選択画像表示
-        index = self.image_list.row(item)
-        full_path = self.current_images[self.current_page * self.images_per_page + index]
-        
-        pixmap = QPixmap(full_path)
-        scaled_pixmap = pixmap.scaled(400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.image_display.setPixmap(scaled_pixmap)
-        
-        # メタデータ解析
-        self.analyze_metadata(full_path)
-
-    def analyze_metadata(self, image_path):
-        # メタデータ解析
-        self.metadata_list.clear()
-        try:
-            with Image.open(image_path) as img:
-                # メタデータ取得（Exifやその他の方法）
-                metadata = img.info.get('parameters', '')
-                if metadata:
-                    # メタデータからキーワード候補を抽出
-                    keywords = self.extract_keywords(metadata)
-                    self.metadata_list.addItems(keywords)
-        except Exception as e:
-            print(f"メタデータ解析エラー: {e}")
-
-    def extract_keywords(self, metadata):
-        # キーワード抽出ロジック
-        # 実際の実装ではより高度な自然言語処理が必要
+    def extract_metadata_keywords(self, image):
+        """画像からメタデータキーワードを抽出"""
         keywords = []
-        for category, words in self.metadata_keywords.items():
-            for word in words:
-                if word.lower() in metadata.lower():
-                    keywords.append(word)
-        return keywords
-
-    def insert_metadata_keyword(self, item):
-        # メタデータキーワード挿入
-        keyword = item.text()
-        current_text = self.rename_input.text()
-        self.rename_input.setText(f"{current_text} {keyword}")
-
-    def prev_page(self):
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.update_image_list()
-
-    def next_page(self):
-        if (self.current_page + 1) * self.images_per_page < len(self.current_images):
-            self.current_page += 1
-            self.update_image_list()
-
-    def rename_files(self):
-        # リネーム処理
-        new_name = self.rename_input.text().strip()
-        if not new_name:
-            QMessageBox.warning(self, '警告', '新しい名前を入力してください')
-            return
-
-        # 文字数チェック
-        if len(new_name) > 65:  # 全角65文字相当
-            QMessageBox.warning(self, '警告', '文字数が制限を超えています')
-            return
-
-        # 確認ダイアログ
-        reply = QMessageBox.question(
-            self, 'リネーム確認', 
-            f'選択した画像を\n{new_name}\nでリネームしますか？', 
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply == QMessageBox.Yes:
-            selected_items = self.image_list.selectedItems()
-            if not selected_items:
-                QMessageBox.warning(self, '警告', '画像を選択してください')
-                return
-
-            for item in selected_items:
-                index = self.image_list.row(item)
-                full_path = self.current_images[self.current_page * self.images_per_page + index]
-                directory = os.path.dirname(full_path)
-                file_ext = os.path.splitext(full_path)[1]
-                
-                # 連番付与
-                base_name = f"{new_name}"
-                counter = 1
-                new_path = os.path.join(directory, f"{base_name}{file_ext}")
-                while os.path.exists(new_path):
-                    new_path = os.path.join(directory, f"{base_name}_{counter}{file_ext}")
-                    counter += 1
-                
-                os.rename(full_path, new_path)
+        try:
+            # Exifメタデータの解析
+            exif_data = image._getexif()
+            if exif_data:
+                for tag_id, value in exif_data.items():
+                    tag_name = TAGS.get(tag_id, tag_id)
+                    if isinstance(value, str):
+                        # 既知のキーワードとマッチングする部分を抽出
+                        for category, category_words in self.metadata_keywords.items():
+                            for word in category_words:
+                                if word in value:
+                                    keywords.append(word)
             
-            # リスト再読み込み
-            self.load_images(directory)
+            # パラメータ文字列からのキーワード抽出
+            # これはStable Diffusionなどのメタデータ解析用
+            param_str = image.info.get('parameters', '')
+            if param_str:
+                # 簡易的なキーワード抽出
+                for category, category_words in self.metadata_keywords.items():
+                    keywords.extend([
+                        word for word in category_words 
+                        if word.lower() in param_str.lower()
+                    ])
+        
+        except Exception as e:
+            st.warning(f"メタデータ解析中にエラーが発生: {e}")
+        
+        return list(set(keywords))  # 重複を削除
+
+    def create_word_blocks(self, additional_keywords=None):
+        """ワードブロックの作成（メタデータキーワード含む）"""
+        # 全てのワードを統合
+        all_words = (
+            st.session_state.settings['template_texts'] + 
+            st.session_state.settings['big_words'] + 
+            st.session_state.settings['small_words']
+        )
+        
+        # メタデータキーワードを追加
+        if additional_keywords:
+            all_words.extend(additional_keywords)
+        
+        # ワードブロックのHTML/CSS
+        st.markdown("""
+        <style>
+        .word-block {
+            display: inline-block;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 5px 10px;
+            margin: 5px;
+            cursor: move;
+        }
+        #rename-input {
+            width: 100%;
+            font-size: 16px;
+            padding: 10px;
+        }
+        </style>
+        <script>
+        function allowDrop(ev) {
+            ev.preventDefault();
+        }
+
+        function drag(ev) {
+            ev.dataTransfer.setData("text", ev.target.innerText);
+        }
+
+        function drop(ev) {
+            ev.preventDefault();
+            var data = ev.dataTransfer.getData("text");
+            var input = document.getElementById("rename-input");
+            var startPos = input.selectionStart;
+            var endPos = input.selectionEnd;
+            
+            var currentValue = input.value;
+            var newValue = 
+                currentValue.slice(0, startPos) + 
+                " " + data + " " + 
+                currentValue.slice(endPos);
+            
+            input.value = newValue.replace(/\s+/g, ' ').trim();
+            
+            const event = new Event('input');
+            input.dispatchEvent(event);
+        }
+        </script>
+        """, unsafe_allow_html=True)
+
+        # ワードブロックの表示
+        word_block_html = ""
+        for word in all_words:
+            word_block_html += f'<span class="word-block" draggable="true" ondragstart="drag(event)">{word}</span>'
+        
+        st.markdown(f'<div ondrop="drop(event)" ondragover="allowDrop(event)">{word_block_html}</div>', unsafe_allow_html=True)
+
+    def rename_files(self, files, base_name, start_number, number_padding):
+        """
+        ファイルをリネームする
+        
+        :param files: アップロードされたファイルリスト
+        :param base_name: ベースとなるリネーム名
+        :param start_number: 開始番号
+        :param number_padding: 連番のパディング桁数
+        :return: リネーム結果の辞書
+        """
+        results = {}
+        
+        for idx, uploaded_file in enumerate(files, start=start_number):
+            # 連番付きのファイル名を生成
+            number_str = f"{idx:0{number_padding}d}"
+            file_ext = os.path.splitext(uploaded_file.name)[1]
+            new_filename = f"{base_name}_{number_str}{file_ext}"
+            
+            try:
+                # ファイルの保存
+                with open(new_filename, "wb") as f:
+                    f.write(uploaded_file.getvalue())
+                results[uploaded_file.name] = new_filename
+            except Exception as e:
+                results[uploaded_file.name] = f"エラー: {str(e)}"
+        
+        return results
 
 def main():
-    app = QApplication(sys.argv)
-    renamer = EasyRenamer()
-    renamer.show()
-    sys.exit(app.exec_())
+    st.set_page_config(page_title="Easy Renamer", layout="wide")
+    st.title("🖼️ Easy Renamer - 画像リネームツール")
 
-if __name__ == '__main__':
+    renamer = EasyRenamer()
+
+    tab1, tab2, tab3 = st.tabs(["リネーム", "定型文管理", "検索ワード管理"])
+
+    with tab1:
+        st.header("📤 画像アップロード")
+        uploaded_files = st.file_uploader(
+            "画像をアップロード (最大2GB/ファイル)", 
+            accept_multiple_files=True, 
+            type=['png', 'jpg', 'jpeg', 'webp'],
+            help="最大2GBまでの画像をアップロードできます"
+        )
+
+        if uploaded_files:
+            # メタデータキーワード抽出のプレビュー
+            st.header("🔍 メタデータキーワード")
+            preview_image = Image.open(uploaded_files[0])
+            metadata_keywords = renamer.extract_metadata_keywords(preview_image)
+            st.write("抽出されたキーワード:", metadata_keywords)
+
+            # 連番設定
+            st.header("🔢 連番設定")
+            col1, col2 = st.columns(2)
+            with col1:
+                start_number = st.number_input("開始番号", min_value=1, value=1)
+            with col2:
+                number_padding = st.selectbox("桁数", [2, 3, 4, 5], index=1)
+
+            # リネーム名称入力
+            st.header("📝 リネーム名称")
+            
+            # メタデータキーワードを含めたワードブロック
+            renamer.create_word_blocks(additional_keywords=metadata_keywords)
+            
+            # リネーム入力
+            rename_input = st.text_input(
+                "リネーム名を入力", 
+                key="rename_input",
+                help="ワードブロックをドラッグ&ドロップで挿入できます"
+            )
+
+            # 画像一覧
+            st.header("🖼️ 画像一覧")
+            
+            # ページネーション付きの50個表示
+            page_size = 50
+            total_pages = (len(uploaded_files) - 1) // page_size + 1
+            page_number = st.number_input(
+                "ページ", 
+                min_value=1, 
+                max_value=total_pages, 
+                value=1
+            )
+            
+            start_idx = (page_number - 1) * page_size
+            end_idx = start_idx + page_size
+            page_files = uploaded_files[start_idx:end_idx]
+            
+            # 画像名称一覧
+            st.subheader("画像名称一覧")
+            image_names = [f.name for f in page_files]
+            st.table(image_names)
+
+            # リネーム処理
+            if st.button("画像をリネーム", type="primary"):
+                if rename_input:
+                    # リネーム処理を実行
+                    rename_results = renamer.rename_files(
+                        uploaded_files, 
+                        rename_input, 
+                        start_number, 
+                        number_padding
+                    )
+                    
+                    # 結果を表示
+                    st.subheader("リネーム結果")
+                    for original, new_name in rename_results.items():
+                        st.write(f"{original} → {new_name}")
+                else:
+                    st.warning("リネーム名を入力してください")
+
+def main_wrapper():
     main()
+
+if __name__ == "__main__":
+    main_wrapper()
