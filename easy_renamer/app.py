@@ -3,6 +3,7 @@ import streamlit as st
 from PIL import Image
 from PIL.ExifTags import TAGS
 import json
+import base64
 import re
 
 class EasyRenamer:
@@ -11,57 +12,56 @@ class EasyRenamer:
         if 'settings' not in st.session_state:
             self.load_settings()
         
-        # メタデータ解析用キーワード
-        self.metadata_keywords = self.load_metadata_keywords()
+        # AI生成画像用の追加メタデータキーワード
+        self.ai_image_keywords = [
+            'Stable Diffusion', 'Prompt', 'Negative prompt', 
+            'Steps', 'CFG scale', 'Seed', 'Model', 
+            'Characters', 'Style', 'Emotion'
+        ]
 
     def load_settings(self):
         """設定ファイルの読み込み"""
+        default_settings = {
+            'template_texts': ['出品画像', 'カードゲーム用', 'コレクション'],
+            'big_words': ['キャラクター', '美少女', 'アニメ'],
+            'small_words': ['可愛い', '人気', '高品質'],
+            'registered_words': []
+        }
+        
         try:
             with open('settings.json', 'r', encoding='utf-8') as f:
                 st.session_state.settings = json.load(f)
         except FileNotFoundError:
-            st.session_state.settings = {
-                'template_texts': ['出品画像', 'カードゲーム用', 'コレクション'],
-                'big_words': ['キャラクター', '美少女', 'アニメ'],
-                'small_words': ['可愛い', '人気', '高品質'],
-                'registered_words': []
-            }
+            st.session_state.settings = default_settings
 
-    def load_metadata_keywords(self):
-        """メタデータ解析用キーワードの読み込み"""
-        return {
-            'characters': ['初音ミク', '鏡音リン', '巡音ルカ'],
-            'styles': ['アニメ調', 'イラスト', 'リアル'],
-            'emotions': ['笑顔', '真剣', '困り顔'],
-            'poses': ['立ち絵', '全身', 'バストアップ']
-        }
+    def save_settings(self):
+        """設定ファイルの保存"""
+        try:
+            with open('settings.json', 'w', encoding='utf-8') as f:
+                json.dump(st.session_state.settings, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            st.error(f"設定の保存中にエラーが発生: {e}")
 
-    def extract_metadata_keywords(self, image):
+    def extract_metadata_keywords(self, image_file):
         """画像からメタデータキーワードを抽出"""
         keywords = []
         try:
-            # Exifメタデータの解析
-            exif_data = image._getexif()
-            if exif_data:
-                for tag_id, value in exif_data.items():
-                    tag_name = TAGS.get(tag_id, tag_id)
-                    if isinstance(value, str):
-                        # 既知のキーワードとマッチングする部分を抽出
-                        for category, category_words in self.metadata_keywords.items():
-                            for word in category_words:
-                                if word in value:
-                                    keywords.append(word)
+            # 画像をPIL Imageオブジェクトに変換
+            image = Image.open(image_file)
             
             # パラメータ文字列からのキーワード抽出
-            # これはStable Diffusionなどのメタデータ解析用
             param_str = image.info.get('parameters', '')
             if param_str:
-                # 簡易的なキーワード抽出
-                for category, category_words in self.metadata_keywords.items():
-                    keywords.extend([
-                        word for word in category_words 
-                        if word.lower() in param_str.lower()
-                    ])
+                # AIキーワードを検索
+                keywords.extend([
+                    keyword for keyword in self.ai_image_keywords 
+                    if keyword.lower() in param_str.lower()
+                ])
+                
+                # カスタムキーワード抽出のロジック
+                # 例：プロンプトから関連キーワードを抽出
+                prompt_match = re.findall(r'\b[A-Za-z]+\b', param_str)
+                keywords.extend(prompt_match[:5])  # 最初の5つのキーワードを追加
         
         except Exception as e:
             st.warning(f"メタデータ解析中にエラーが発生: {e}")
@@ -69,7 +69,7 @@ class EasyRenamer:
         return list(set(keywords))  # 重複を削除
 
     def create_word_blocks(self, additional_keywords=None):
-        """ワードブロックの作成（メタデータキーワード含む）"""
+        """ワードブロックの作成"""
         # 全てのワードを統合
         all_words = (
             st.session_state.settings['template_texts'] + 
@@ -147,16 +147,21 @@ class EasyRenamer:
         :return: リネーム結果の辞書
         """
         results = {}
+        output_dir = 'renamed_images'
+        
+        # 出力ディレクトリが存在しない場合は作成
+        os.makedirs(output_dir, exist_ok=True)
         
         for idx, uploaded_file in enumerate(files, start=start_number):
             # 連番付きのファイル名を生成
             number_str = f"{idx:0{number_padding}d}"
             file_ext = os.path.splitext(uploaded_file.name)[1]
             new_filename = f"{base_name}_{number_str}{file_ext}"
+            new_filepath = os.path.join(output_dir, new_filename)
             
             try:
                 # ファイルの保存
-                with open(new_filename, "wb") as f:
+                with open(new_filepath, "wb") as f:
                     f.write(uploaded_file.getvalue())
                 results[uploaded_file.name] = new_filename
             except Exception as e:
@@ -184,8 +189,7 @@ def main():
         if uploaded_files:
             # メタデータキーワード抽出のプレビュー
             st.header("🔍 メタデータキーワード")
-            preview_image = Image.open(uploaded_files[0])
-            metadata_keywords = renamer.extract_metadata_keywords(preview_image)
+            metadata_keywords = renamer.extract_metadata_keywords(uploaded_files[0])
             st.write("抽出されたキーワード:", metadata_keywords)
 
             # 連番設定
@@ -246,6 +250,18 @@ def main():
                     st.subheader("リネーム結果")
                     for original, new_name in rename_results.items():
                         st.write(f"{original} → {new_name}")
+                    
+                    # リネームされた画像フォルダをダウンロード可能に
+                    with open('renamed_images.zip', 'wb') as zipf:
+                        shutil.make_archive('renamed_images', 'zip', 'renamed_images')
+                    
+                    with open('renamed_images.zip', 'rb') as f:
+                        st.download_button(
+                            label="リネーム済み画像をダウンロード",
+                            data=f.read(),
+                            file_name='renamed_images.zip',
+                            mime='application/zip'
+                        )
                 else:
                     st.warning("リネーム名を入力してください")
 
