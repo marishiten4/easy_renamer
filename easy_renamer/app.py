@@ -14,10 +14,6 @@ class EasyRenamer:
         if 'settings' not in st.session_state:
             self.load_settings()
         
-        # Initialize selected image index
-        if 'selected_image_index' not in st.session_state:
-            st.session_state.selected_image_index = 0
-        
         # AI image metadata keywords
         self.ai_image_keywords = [
             'Stable Diffusion', 'Prompt', 'Negative prompt', 
@@ -75,7 +71,7 @@ class EasyRenamer:
         return list(set(keywords))  # Remove duplicates
 
     def create_word_blocks(self, additional_keywords=None):
-        """Create word blocks with new styling"""
+        """Create word blocks with drag and drop functionality"""
         # Combine all words
         all_words = (
             st.session_state.settings['template_texts'] + 
@@ -88,7 +84,7 @@ class EasyRenamer:
         if additional_keywords:
             all_words.extend(additional_keywords)
         
-        # Word block JavaScript
+        # Word block HTML/CSS with drag and drop
         st.markdown("""
         <style>
         .word-block {
@@ -99,55 +95,51 @@ class EasyRenamer:
             border-radius: 5px;
             padding: 5px 10px;
             margin: 5px;
-            cursor: pointer;
+            cursor: move;
             font-weight: bold;
         }
-        .selected-image {
-            border: 3px solid #4169E1;
-            box-shadow: 0 0 10px rgba(65, 105, 225, 0.5);
+        #rename-input {
+            width: 100%;
+            font-size: 16px;
+            padding: 10px;
         }
         </style>
         <script>
-        // Function to insert text at cursor position
-        function insertAtCursor(input, text) {
-            // Get the current cursor position
-            const startPos = input.selectionStart;
-            const endPos = input.selectionEnd;
+        function allowDrop(ev) {
+            ev.preventDefault();
+        }
+
+        function drag(ev) {
+            ev.dataTransfer.setData("text", ev.target.innerText);
+        }
+
+        function drop(ev) {
+            ev.preventDefault();
+            var data = ev.dataTransfer.getData("text");
+            var input = document.getElementById("rename-input");
+            var startPos = input.selectionStart;
+            var endPos = input.selectionEnd;
             
-            // Insert the text
-            const newValue = 
-                input.value.substring(0, startPos) + 
-                " " + text + " " + 
-                input.value.substring(endPos);
+            var currentValue = input.value;
+            var newValue = 
+                currentValue.slice(0, startPos) + 
+                " " + data + " " + 
+                currentValue.slice(endPos);
             
-            // Update the input value
             input.value = newValue.replace(/\s+/g, ' ').trim();
             
-            // Dispatch input event to update Streamlit
             const event = new Event('input');
             input.dispatchEvent(event);
         }
-
-        // Add click event listeners to word blocks
-        document.addEventListener('DOMContentLoaded', function() {
-            const wordBlocks = document.querySelectorAll('.word-block');
-            const input = document.getElementById('rename-input');
-            
-            wordBlocks.forEach(block => {
-                block.addEventListener('click', function() {
-                    insertAtCursor(input, this.textContent);
-                });
-            });
-        });
         </script>
         """, unsafe_allow_html=True)
 
         # Display word blocks
         word_block_html = ""
         for word in all_words:
-            word_block_html += f'<span class="word-block">{word}</span>'
+            word_block_html += f'<span class="word-block" draggable="true" ondragstart="drag(event)">{word}</span>'
         
-        st.markdown(f'<div>{word_block_html}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div ondrop="drop(event)" ondragover="allowDrop(event)">{word_block_html}</div>', unsafe_allow_html=True)
 
     def rename_files(self, files, base_name, custom_numbering, number_position):
         """
@@ -231,37 +223,37 @@ def main():
             end_idx = start_idx + page_size
             page_files = uploaded_files[start_idx:end_idx]
 
-            # Image gallery and preview
-            st.subheader("画像一覧")
-            cols = st.columns(5)  # 5 columns for image gallery
+            # Image selection and preview
+            col1, col2 = st.columns(2)
             
-            for i, uploaded_file in enumerate(page_files):
-                col = cols[i % 5]
-                with col:
-                    # Load image
-                    image = Image.open(uploaded_file)
-                    
-                    # Create a BytesIO object to display the image
-                    img_byte_arr = io.BytesIO()
-                    image.save(img_byte_arr, format=image.format)
-                    img_byte_arr = img_byte_arr.getvalue()
-                    
-                    # Apply selected style if this is the selected image
-                    image_class = 'selected-image' if i == st.session_state.selected_image_index else ''
-                    
-                    # Display image with click functionality
-                    if st.image(img_byte_arr, caption=uploaded_file.name, use_column_width=True, 
-                                output_format='PNG', 
-                                clamp=True):
-                        # Update selected image index
-                        st.session_state.selected_image_index = i
+            with col1:
+                st.subheader("画像一覧")
+                image_names = [f.name for f in page_files]
+                selected_image_name = st.selectbox(
+                    "画像を選択", 
+                    image_names,
+                    key="image_selector"
+                )
+                
+                # Find the selected image file
+                selected_image = next(f for f in page_files if f.name == selected_image_name)
+                
+                # Metadata keywords extraction
+                metadata_keywords = renamer.extract_metadata_keywords(selected_image)
+                st.write("抽出されたキーワード:", metadata_keywords)
 
-            # Get currently selected image
-            selected_image = page_files[st.session_state.selected_image_index]
-            
-            # Metadata keywords extraction
-            metadata_keywords = renamer.extract_metadata_keywords(selected_image)
-            st.write("抽出されたキーワード:", metadata_keywords)
+            with col2:
+                st.subheader("画像プレビュー")
+                # Load and display image
+                image = Image.open(selected_image)
+                
+                # Create a BytesIO object to display the image
+                img_byte_arr = io.BytesIO()
+                image.save(img_byte_arr, format=image.format)
+                img_byte_arr = img_byte_arr.getvalue()
+                
+                # Display image with expansion option
+                st.image(img_byte_arr, caption=selected_image_name, use_column_width=True)
 
             # Rename settings
             st.header("🔢 リネーム設定")
@@ -288,7 +280,7 @@ def main():
             rename_input = st.text_input(
                 "リネーム名を入力", 
                 key="rename_input",
-                help="ワードブロックをクリックで挿入できます"
+                help="ワードブロックをドラッグ&ドロップで挿入できます"
             )
 
             # Character count validation
@@ -328,6 +320,7 @@ def main():
                 else:
                     st.warning("リネーム名を入力してください")
 
+    # Rest of the code remains the same as in the previous version
     with tab2:
         st.header("📋 定型文管理")
         template_words = st.text_input("定型文を追加")
