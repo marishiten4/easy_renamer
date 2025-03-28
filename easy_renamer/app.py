@@ -14,6 +14,10 @@ class EasyRenamer:
         if 'settings' not in st.session_state:
             self.load_settings()
         
+        # Initialize selected image index
+        if 'selected_image_index' not in st.session_state:
+            st.session_state.selected_image_index = 0
+        
         # AI image metadata keywords
         self.ai_image_keywords = [
             'Stable Diffusion', 'Prompt', 'Negative prompt', 
@@ -27,7 +31,8 @@ class EasyRenamer:
             'template_texts': ['出品画像', 'カードゲーム用', 'コレクション'],
             'big_words': ['キャラクター', '美少女', 'アニメ'],
             'small_words': ['可愛い', '人気', '高品質'],
-            'registered_words': []
+            'registered_words': [],
+            'metadata_keywords': []
         }
         
         try:
@@ -75,14 +80,15 @@ class EasyRenamer:
         all_words = (
             st.session_state.settings['template_texts'] + 
             st.session_state.settings['big_words'] + 
-            st.session_state.settings['small_words']
+            st.session_state.settings['small_words'] +
+            st.session_state.settings['metadata_keywords']
         )
         
         # Add metadata keywords
         if additional_keywords:
             all_words.extend(additional_keywords)
         
-        # Word block HTML/CSS with Royal Blue background and White text
+        # Word block JavaScript
         st.markdown("""
         <style>
         .word-block {
@@ -93,59 +99,64 @@ class EasyRenamer:
             border-radius: 5px;
             padding: 5px 10px;
             margin: 5px;
-            cursor: move;
+            cursor: pointer;
             font-weight: bold;
         }
-        #rename-input {
-            width: 100%;
-            font-size: 16px;
-            padding: 10px;
+        .selected-image {
+            border: 3px solid #4169E1;
+            box-shadow: 0 0 10px rgba(65, 105, 225, 0.5);
         }
         </style>
         <script>
-        function allowDrop(ev) {
-            ev.preventDefault();
-        }
-
-        function drag(ev) {
-            ev.dataTransfer.setData("text", ev.target.innerText);
-        }
-
-        function drop(ev) {
-            ev.preventDefault();
-            var data = ev.dataTransfer.getData("text");
-            var input = document.getElementById("rename-input");
-            var startPos = input.selectionStart;
-            var endPos = input.selectionEnd;
+        // Function to insert text at cursor position
+        function insertAtCursor(input, text) {
+            // Get the current cursor position
+            const startPos = input.selectionStart;
+            const endPos = input.selectionEnd;
             
-            var currentValue = input.value;
-            var newValue = 
-                currentValue.slice(0, startPos) + 
-                " " + data + " " + 
-                currentValue.slice(endPos);
+            // Insert the text
+            const newValue = 
+                input.value.substring(0, startPos) + 
+                " " + text + " " + 
+                input.value.substring(endPos);
             
+            // Update the input value
             input.value = newValue.replace(/\s+/g, ' ').trim();
             
+            // Dispatch input event to update Streamlit
             const event = new Event('input');
             input.dispatchEvent(event);
         }
+
+        // Add click event listeners to word blocks
+        document.addEventListener('DOMContentLoaded', function() {
+            const wordBlocks = document.querySelectorAll('.word-block');
+            const input = document.getElementById('rename-input');
+            
+            wordBlocks.forEach(block => {
+                block.addEventListener('click', function() {
+                    insertAtCursor(input, this.textContent);
+                });
+            });
+        });
         </script>
         """, unsafe_allow_html=True)
 
         # Display word blocks
         word_block_html = ""
         for word in all_words:
-            word_block_html += f'<span class="word-block" draggable="true" ondragstart="drag(event)">{word}</span>'
+            word_block_html += f'<span class="word-block">{word}</span>'
         
-        st.markdown(f'<div ondrop="drop(event)" ondragover="allowDrop(event)">{word_block_html}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div>{word_block_html}</div>', unsafe_allow_html=True)
 
-    def rename_files(self, files, base_name, custom_numbering):
+    def rename_files(self, files, base_name, custom_numbering, number_position):
         """
         Rename files with custom numbering
         
         :param files: List of uploaded files
         :param base_name: Base rename name
         :param custom_numbering: Custom numbering format
+        :param number_position: Position of numbering (prefix or suffix)
         :return: Dictionary of rename results
         """
         results = {}
@@ -159,9 +170,14 @@ class EasyRenamer:
             file_ext = os.path.splitext(uploaded_file.name)[1]
             
             # Replace placeholders in custom numbering
-            number_str = custom_numbering.replace('{n}', str(idx))
+            number_str = custom_numbering.format(n=idx)
             
-            new_filename = f"{base_name}_{number_str}{file_ext}"
+            # Determine filename based on number position
+            if number_position == 'prefix':
+                new_filename = f"{number_str}_{base_name}{file_ext}"
+            else:  # suffix
+                new_filename = f"{base_name}_{number_str}{file_ext}"
+            
             new_filepath = os.path.join(output_dir, new_filename)
             
             try:
@@ -189,7 +205,7 @@ def main():
 
     renamer = EasyRenamer()
 
-    tab1, tab2, tab3 = st.tabs(["リネーム", "定型文管理", "検索ワード管理"])
+    tab1, tab2, tab3, tab4 = st.tabs(["リネーム", "定型文管理", "検索ワード管理", "メタデータキーワード管理"])
 
     with tab1:
         st.header("📤 画像アップロード")
@@ -215,45 +231,53 @@ def main():
             end_idx = start_idx + page_size
             page_files = uploaded_files[start_idx:end_idx]
 
-            # Image selection and preview
-            col1, col2 = st.columns(2)
+            # Image gallery and preview
+            st.subheader("画像一覧")
+            cols = st.columns(5)  # 5 columns for image gallery
             
-            with col1:
-                st.subheader("画像一覧")
-                selected_image_name = st.selectbox(
-                    "画像を選択", 
-                    [f.name for f in page_files],
-                    key="image_selector"
-                )
-                
-                # Find the selected image file
-                selected_image = next(f for f in page_files if f.name == selected_image_name)
-                
-                # Metadata keywords extraction
-                metadata_keywords = renamer.extract_metadata_keywords(selected_image)
-                st.write("抽出されたキーワード:", metadata_keywords)
+            for i, uploaded_file in enumerate(page_files):
+                col = cols[i % 5]
+                with col:
+                    # Load image
+                    image = Image.open(uploaded_file)
+                    
+                    # Create a BytesIO object to display the image
+                    img_byte_arr = io.BytesIO()
+                    image.save(img_byte_arr, format=image.format)
+                    img_byte_arr = img_byte_arr.getvalue()
+                    
+                    # Apply selected style if this is the selected image
+                    image_class = 'selected-image' if i == st.session_state.selected_image_index else ''
+                    
+                    # Display image with click functionality
+                    if st.image(img_byte_arr, caption=uploaded_file.name, use_column_width=True, 
+                                output_format='PNG', 
+                                clamp=True):
+                        # Update selected image index
+                        st.session_state.selected_image_index = i
 
-            with col2:
-                st.subheader("画像プレビュー")
-                # Load and display image
-                image = Image.open(selected_image)
-                
-                # Create a BytesIO object to display the image
-                img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format=image.format)
-                img_byte_arr = img_byte_arr.getvalue()
-                
-                # Display image with expansion option
-                st.image(img_byte_arr, caption=selected_image_name, use_column_width=True)
+            # Get currently selected image
+            selected_image = page_files[st.session_state.selected_image_index]
+            
+            # Metadata keywords extraction
+            metadata_keywords = renamer.extract_metadata_keywords(selected_image)
+            st.write("抽出されたキーワード:", metadata_keywords)
 
             # Rename settings
             st.header("🔢 リネーム設定")
+            
+            # Numbering position selection
+            number_position = st.radio(
+                "連番の位置", 
+                ['prefix', 'suffix'], 
+                format_func=lambda x: '先頭' if x == 'prefix' else '末尾'
+            )
             
             # Customizable numbering input
             custom_numbering = st.text_input(
                 "連番形式",
                 value="{n:02d}",
-                help="例: {n:02d} (数字2桁), A{n:03d} (文字と数字の組み合わせ)"
+                help="例: {n:02d} (数字2桁), A{n} (文字と数字の組み合わせ)"
             )
             
             # Rename blocks
@@ -264,7 +288,7 @@ def main():
             rename_input = st.text_input(
                 "リネーム名を入力", 
                 key="rename_input",
-                help="ワードブロックをドラッグ&ドロップで挿入できます"
+                help="ワードブロックをクリックで挿入できます"
             )
 
             # Character count validation
@@ -281,7 +305,8 @@ def main():
                     rename_results = renamer.rename_files(
                         uploaded_files, 
                         rename_input, 
-                        custom_numbering
+                        custom_numbering,
+                        number_position
                     )
                     
                     # Display results
@@ -329,6 +354,22 @@ def main():
             renamer.add_word('small_words', small_word)
         
         st.write("現在の小さめワード:", st.session_state.settings['small_words'])
+
+    with tab4:
+        st.header("🏷️ メタデータキーワード管理")
+        
+        # Metadata keywords management
+        metadata_keyword = st.text_input("メタデータキーワードを追加")
+        if st.button("メタデータキーワードを追加"):
+            # Add to metadata keywords list
+            if metadata_keyword and metadata_keyword not in st.session_state.settings['metadata_keywords']:
+                st.session_state.settings['metadata_keywords'].append(metadata_keyword)
+                renamer.save_settings()
+                st.success(f"メタデータキーワード '{metadata_keyword}' を追加しました")
+            elif metadata_keyword in st.session_state.settings['metadata_keywords']:
+                st.warning(f"メタデータキーワード '{metadata_keyword}' は既に存在します")
+        
+        st.write("現在のメタデータキーワード:", st.session_state.settings['metadata_keywords'])
 
 def main_wrapper():
     main()
