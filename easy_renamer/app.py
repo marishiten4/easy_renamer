@@ -20,6 +20,10 @@ class EasyRenamer:
             'Steps', 'CFG scale', 'Seed', 'Model', 
             'Characters', 'Style', 'Emotion'
         ]
+        
+        # Metadata keyword mapping
+        if 'keyword_mapping' not in st.session_state:
+            st.session_state.keyword_mapping = {}
 
     def load_settings(self):
         """Load settings file"""
@@ -62,8 +66,18 @@ class EasyRenamer:
                 ])
                 
                 # Extract custom keywords
-                prompt_match = re.findall(r'\b[A-Za-z]+\b', param_str)
-                keywords.extend(prompt_match[:5])  # Add first 5 keywords
+                prompt_keywords = re.findall(r'\b[A-Za-z]+\b', param_str)
+                keywords.extend(prompt_keywords[:5])  # Add first 5 keywords
+                
+                # Check if keywords have mappings
+                mapped_keywords = []
+                for keyword in keywords:
+                    mapped = st.session_state.keyword_mapping.get(keyword.lower())
+                    if mapped:
+                        mapped_keywords.append(mapped)
+                
+                # Add mapped keywords
+                keywords.extend(mapped_keywords)
         
         except Exception as e:
             st.warning(f"メタデータ解析中にエラーが発生: {e}")
@@ -84,6 +98,9 @@ class EasyRenamer:
         if additional_keywords:
             all_words.extend(additional_keywords)
         
+        # Unique words
+        all_words = list(set(all_words))
+        
         # Word block HTML/CSS with drag and drop
         st.markdown("""
         <style>
@@ -102,6 +119,9 @@ class EasyRenamer:
             width: 100%;
             font-size: 16px;
             padding: 10px;
+        }
+        .selected-block {
+            background-color: #228B22 !important;
         }
         </style>
         <script>
@@ -135,6 +155,7 @@ class EasyRenamer:
         """, unsafe_allow_html=True)
 
         # Display word blocks
+        st.subheader("単語ブロック")
         word_block_html = ""
         for word in all_words:
             word_block_html += f'<span class="word-block" draggable="true" ondragstart="drag(event)">{word}</span>'
@@ -191,13 +212,23 @@ class EasyRenamer:
         elif word in st.session_state.settings[word_type]:
             st.warning(f"ワード '{word}' は既に存在します")
 
+    def add_keyword_mapping(self, original_keyword, mapped_keyword):
+        """Add a new keyword mapping"""
+        if original_keyword and mapped_keyword:
+            st.session_state.keyword_mapping[original_keyword.lower()] = mapped_keyword
+            st.success(f"キーワードマッピング: '{original_keyword}' → '{mapped_keyword}' を追加しました")
+        else:
+            st.warning("キーワードとマッピングを両方入力してください")
+
 def main():
     st.set_page_config(page_title="Easy Renamer", layout="wide")
     st.title("🖼️ Easy Renamer - 画像リネームツール")
 
     renamer = EasyRenamer()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["リネーム", "定型文管理", "検索ワード管理", "メタデータキーワード管理"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["リネーム", "定型文管理", "検索ワード管理", "メタデータキーワード管理", "キーワードマッピング"]
+    )
 
     with tab1:
         st.header("📤 画像アップロード")
@@ -223,37 +254,55 @@ def main():
             end_idx = start_idx + page_size
             page_files = uploaded_files[start_idx:end_idx]
 
-            # Image selection and preview
-            col1, col2 = st.columns(2)
+            # Image list and preview
+            col1, col2 = st.columns([1, 1])
             
             with col1:
                 st.subheader("画像一覧")
-                image_names = [f.name for f in page_files]
-                selected_image_name = st.selectbox(
-                    "画像を選択", 
-                    image_names,
-                    key="image_selector"
-                )
                 
-                # Find the selected image file
-                selected_image = next(f for f in page_files if f.name == selected_image_name)
-                
-                # Metadata keywords extraction
-                metadata_keywords = renamer.extract_metadata_keywords(selected_image)
-                st.write("抽出されたキーワード:", metadata_keywords)
+                # Display images as a grid
+                for i, file in enumerate(page_files):
+                    # Create a thumbnail
+                    image = Image.open(file)
+                    image.thumbnail((200, 200))
+                    img_byte_arr = io.BytesIO()
+                    image.save(img_byte_arr, format=image.format)
+                    img_byte_arr = img_byte_arr.getvalue()
+                    
+                    # Use st.checkbox for selection with visual feedback
+                    selected = st.checkbox(
+                        file.name, 
+                        key=f"image_select_{i}",
+                        value=False,
+                        label_visibility="visible"
+                    )
+                    
+                    # Display thumbnail
+                    st.image(img_byte_arr, caption=file.name, use_column_width=True)
+                    
+                    # If selected, process metadata
+                    if selected:
+                        selected_image = file
+                        
+                        # Metadata keywords extraction
+                        metadata_keywords = renamer.extract_metadata_keywords(selected_image)
+                        st.write("抽出されたキーワード:", metadata_keywords)
 
             with col2:
+                # Preview of selected image (if any)
                 st.subheader("画像プレビュー")
-                # Load and display image
-                image = Image.open(selected_image)
                 
-                # Create a BytesIO object to display the image
-                img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format=image.format)
-                img_byte_arr = img_byte_arr.getvalue()
-                
-                # Display image with expansion option
-                st.image(img_byte_arr, caption=selected_image_name, use_column_width=True)
+                if 'selected_image' in locals():
+                    # Load and display image
+                    image = Image.open(selected_image)
+                    
+                    # Create a BytesIO object to display the image
+                    img_byte_arr = io.BytesIO()
+                    image.save(img_byte_arr, format=image.format)
+                    img_byte_arr = img_byte_arr.getvalue()
+                    
+                    # Display image with expansion option
+                    st.image(img_byte_arr, caption=selected_image.name, use_column_width=True)
 
             # Rename settings
             st.header("🔢 リネーム設定")
@@ -274,7 +323,7 @@ def main():
             
             # Rename blocks
             st.header("📝 リネーム名称")
-            renamer.create_word_blocks(additional_keywords=metadata_keywords)
+            renamer.create_word_blocks(additional_keywords=metadata_keywords if 'metadata_keywords' in locals() else None)
             
             # Rename input
             rename_input = st.text_input(
@@ -320,7 +369,6 @@ def main():
                 else:
                     st.warning("リネーム名を入力してください")
 
-    # Rest of the code remains the same as in the previous version
     with tab2:
         st.header("📋 定型文管理")
         template_words = st.text_input("定型文を追加")
@@ -363,6 +411,31 @@ def main():
                 st.warning(f"メタデータキーワード '{metadata_keyword}' は既に存在します")
         
         st.write("現在のメタデータキーワード:", st.session_state.settings['metadata_keywords'])
+
+    with tab5:
+        st.header("🔗 キーワードマッピング")
+        
+        # Keyword mapping management
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            original_keyword = st.text_input("元のキーワード (英語)")
+        
+        with col2:
+            mapped_keyword = st.text_input("マッピングするキーワード (日本語)")
+        
+        if st.button("キーワードマッピングを追加"):
+            renamer.add_keyword_mapping(original_keyword, mapped_keyword)
+        
+        # Display current mappings
+        st.subheader("現在のキーワードマッピング")
+        if st.session_state.keyword_mapping:
+            mapping_df = st.dataframe(
+                {"元のキーワード": list(st.session_state.keyword_mapping.keys()), 
+                 "マッピングされたキーワード": list(st.session_state.keyword_mapping.values())}
+            )
+        else:
+            st.write("マッピングはまだ追加されていません")
 
 def main_wrapper():
     main()
