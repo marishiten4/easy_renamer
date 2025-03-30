@@ -14,6 +14,9 @@ class EasyRenamer:
         if 'settings' not in st.session_state:
             self.load_settings()
         
+        if 'selected_image_index' not in st.session_state:
+            st.session_state.selected_image_index = None
+            
         # AI image metadata keywords
         self.ai_image_keywords = [
             'Stable Diffusion', 'Prompt', 'Negative prompt', 
@@ -52,6 +55,8 @@ class EasyRenamer:
     def extract_metadata_keywords(self, image_file):
         """Extract metadata keywords from image"""
         keywords = []
+        param_str = ""
+        
         try:
             # Convert to PIL Image object
             image = Image.open(image_file)
@@ -82,7 +87,7 @@ class EasyRenamer:
         except Exception as e:
             st.warning(f"メタデータ解析中にエラーが発生: {e}")
         
-        return list(set(keywords))  # Remove duplicates
+        return list(set(keywords)), param_str  # Remove duplicates and return raw metadata
 
     def create_word_blocks(self, additional_keywords=None):
         """Create word blocks with drag and drop functionality"""
@@ -101,66 +106,18 @@ class EasyRenamer:
         # Unique words
         all_words = list(set(all_words))
         
-        # Word block HTML/CSS with drag and drop
-        st.markdown("""
-        <style>
-        .word-block {
-            display: inline-block;
-            background-color: #4169E1;  /* Royal Blue */
-            color: white;
-            border: 1px solid #1E90FF;
-            border-radius: 5px;
-            padding: 5px 10px;
-            margin: 5px;
-            cursor: move;
-            font-weight: bold;
-        }
-        #rename-input {
-            width: 100%;
-            font-size: 16px;
-            padding: 10px;
-        }
-        .selected-block {
-            background-color: #228B22 !important;
-        }
-        </style>
-        <script>
-        function allowDrop(ev) {
-            ev.preventDefault();
-        }
-
-        function drag(ev) {
-            ev.dataTransfer.setData("text", ev.target.innerText);
-        }
-
-        function drop(ev) {
-            ev.preventDefault();
-            var data = ev.dataTransfer.getData("text");
-            var input = document.getElementById("rename-input");
-            var startPos = input.selectionStart;
-            var endPos = input.selectionEnd;
-            
-            var currentValue = input.value;
-            var newValue = 
-                currentValue.slice(0, startPos) + 
-                " " + data + " " + 
-                currentValue.slice(endPos);
-            
-            input.value = newValue.replace(/\s+/g, ' ').trim();
-            
-            const event = new Event('input');
-            input.dispatchEvent(event);
-        }
-        </script>
-        """, unsafe_allow_html=True)
-
-        # Display word blocks
-        st.subheader("単語ブロック")
-        word_block_html = ""
-        for word in all_words:
-            word_block_html += f'<span class="word-block" draggable="true" ondragstart="drag(event)">{word}</span>'
+        # Display as buttons
+        cols = st.columns(4)
         
-        st.markdown(f'<div ondrop="drop(event)" ondragover="allowDrop(event)">{word_block_html}</div>', unsafe_allow_html=True)
+        for i, word in enumerate(all_words):
+            col_idx = i % 4
+            if cols[col_idx].button(word, key=f"word_btn_{i}", use_container_width=True):
+                # Add the word to the input field
+                current_input = st.session_state.get('rename_input', '')
+                if current_input:
+                    st.session_state['rename_input'] = f"{current_input} {word}"
+                else:
+                    st.session_state['rename_input'] = word
 
     def rename_files(self, files, base_name, custom_numbering, number_position):
         """
@@ -224,6 +181,27 @@ def main():
     st.set_page_config(page_title="Easy Renamer", layout="wide")
     st.title("🖼️ Easy Renamer - 画像リネームツール")
 
+    # Apply custom CSS
+    st.markdown("""
+    <style>
+    .selected-image {
+        border: 3px solid #4169E1 !important;
+        background-color: #F0F8FF;
+    }
+    .image-list {
+        height: 400px;
+        overflow-y: auto;
+        padding: 10px;
+        border: 1px solid #ccc;
+        border-radius: 5px;
+    }
+    .stButton>button {
+        width: 100%;
+        margin-bottom: 5px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     renamer = EasyRenamer()
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
@@ -254,55 +232,56 @@ def main():
             end_idx = start_idx + page_size
             page_files = uploaded_files[start_idx:end_idx]
 
-            # Image list and preview
-            col1, col2 = st.columns([1, 1])
+            # Image selection, preview, and renaming in columns
+            col1, col2 = st.columns([1, 2])
             
             with col1:
                 st.subheader("画像一覧")
                 
-                # Display images as a grid
-                for i, file in enumerate(page_files):
-                    # Create a thumbnail
-                    image = Image.open(file)
-                    image.thumbnail((200, 200))
-                    img_byte_arr = io.BytesIO()
-                    image.save(img_byte_arr, format=image.format)
-                    img_byte_arr = img_byte_arr.getvalue()
-                    
-                    # Use st.checkbox for selection with visual feedback
-                    selected = st.checkbox(
-                        file.name, 
-                        key=f"image_select_{i}",
-                        value=False,
-                        label_visibility="visible"
-                    )
-                    
-                    # Display thumbnail
-                    st.image(img_byte_arr, caption=file.name, use_column_width=True)
-                    
-                    # If selected, process metadata
-                    if selected:
-                        selected_image = file
-                        
-                        # Metadata keywords extraction
-                        metadata_keywords = renamer.extract_metadata_keywords(selected_image)
-                        st.write("抽出されたキーワード:", metadata_keywords)
-
-            with col2:
-                # Preview of selected image (if any)
-                st.subheader("画像プレビュー")
+                # Display file list with clickable items
+                st.markdown('<div class="image-list">', unsafe_allow_html=True)
                 
-                if 'selected_image' in locals():
-                    # Load and display image
-                    image = Image.open(selected_image)
+                for i, file in enumerate(page_files):
+                    if st.button(file.name, key=f"file_{i}", use_container_width=True):
+                        st.session_state.selected_image_index = i
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col2:
+                if st.session_state.selected_image_index is not None and st.session_state.selected_image_index < len(page_files):
+                    selected_image = page_files[st.session_state.selected_image_index]
                     
-                    # Create a BytesIO object to display the image
-                    img_byte_arr = io.BytesIO()
-                    image.save(img_byte_arr, format=image.format)
-                    img_byte_arr = img_byte_arr.getvalue()
+                    # Create columns for metadata and preview
+                    meta_col, preview_col = st.columns([1, 1])
                     
-                    # Display image with expansion option
-                    st.image(img_byte_arr, caption=selected_image.name, use_column_width=True)
+                    with meta_col:
+                        st.subheader("メタデータ")
+                        # Extract metadata
+                        metadata_keywords, raw_metadata = renamer.extract_metadata_keywords(selected_image)
+                        
+                        # Display extracted keywords
+                        st.write("抽出されたキーワード:")
+                        for keyword in metadata_keywords:
+                            st.markdown(f"- {keyword}")
+                        
+                        # Display raw metadata
+                        with st.expander("詳細メタデータ"):
+                            st.text(raw_metadata)
+                    
+                    with preview_col:
+                        st.subheader("画像プレビュー")
+                        # Load and display selected image
+                        image = Image.open(selected_image)
+                        
+                        # Create a BytesIO object to display the image
+                        img_byte_arr = io.BytesIO()
+                        image.save(img_byte_arr, format=image.format)
+                        img_byte_arr = img_byte_arr.getvalue()
+                        
+                        # Display image with expansion option
+                        st.image(img_byte_arr, caption=selected_image.name, use_column_width=True)
+                else:
+                    st.info("左側の一覧から画像を選択してください")
 
             # Rename settings
             st.header("🔢 リネーム設定")
@@ -311,7 +290,8 @@ def main():
             number_position = st.radio(
                 "連番の位置", 
                 ['prefix', 'suffix'], 
-                format_func=lambda x: '先頭' if x == 'prefix' else '末尾'
+                format_func=lambda x: '先頭' if x == 'prefix' else '末尾',
+                horizontal=True
             )
             
             # Customizable numbering input
@@ -323,13 +303,14 @@ def main():
             
             # Rename blocks
             st.header("📝 リネーム名称")
-            renamer.create_word_blocks(additional_keywords=metadata_keywords if 'metadata_keywords' in locals() else None)
+            metadata_kw = metadata_keywords if 'metadata_keywords' in locals() else None
+            renamer.create_word_blocks(additional_keywords=metadata_kw)
             
             # Rename input
             rename_input = st.text_input(
                 "リネーム名を入力", 
                 key="rename_input",
-                help="ワードブロックをドラッグ&ドロップで挿入できます"
+                help="上のボタンをクリックして単語を挿入できます"
             )
 
             # Character count validation
@@ -339,35 +320,74 @@ def main():
             else:
                 st.write(f"文字数: {char_count}")
 
-            # Rename processing
-            if st.button("画像をリネーム", type="primary"):
-                if rename_input:
-                    # Execute rename process
-                    rename_results = renamer.rename_files(
-                        uploaded_files, 
-                        rename_input, 
-                        custom_numbering,
-                        number_position
-                    )
-                    
-                    # Display results
-                    st.subheader("リネーム結果")
-                    for original, new_name in rename_results.items():
-                        st.write(f"{original} → {new_name}")
-                    
-                    # Create and offer zip download
-                    with open('renamed_images.zip', 'wb') as zipf:
-                        shutil.make_archive('renamed_images', 'zip', 'renamed_images')
-                    
-                    with open('renamed_images.zip', 'rb') as f:
-                        st.download_button(
-                            label="リネーム済み画像をダウンロード",
-                            data=f.read(),
-                            file_name='renamed_images.zip',
-                            mime='application/zip'
-                        )
-                else:
-                    st.warning("リネーム名を入力してください")
+            # Rename processing - Add two buttons for options
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("選択画像をリネーム", type="primary"):
+                    if rename_input:
+                        if st.session_state.selected_image_index is not None:
+                            # Rename only selected image
+                            selected_file = [page_files[st.session_state.selected_image_index]]
+                            rename_results = renamer.rename_files(
+                                selected_file,
+                                rename_input,
+                                custom_numbering,
+                                number_position
+                            )
+                            
+                            # Display results
+                            st.subheader("リネーム結果")
+                            for original, new_name in rename_results.items():
+                                st.write(f"{original} → {new_name}")
+                                
+                            # Create and offer zip download
+                            with open('renamed_images.zip', 'wb') as zipf:
+                                shutil.make_archive('renamed_images', 'zip', 'renamed_images')
+                            
+                            with open('renamed_images.zip', 'rb') as f:
+                                st.download_button(
+                                    label="リネーム済み画像をダウンロード",
+                                    data=f.read(),
+                                    file_name='renamed_images.zip',
+                                    mime='application/zip'
+                                )
+                        else:
+                            st.warning("画像を選択してください")
+                    else:
+                        st.warning("リネーム名を入力してください")
+            
+            with col2:
+                if st.button("すべての画像をリネーム", type="secondary"):
+                    if rename_input:
+                        # Confirm with the user
+                        if st.checkbox("一括リネームを確認 (チェックを入れて確定)", key="bulk_confirm"):
+                            # Execute rename process for all files
+                            rename_results = renamer.rename_files(
+                                uploaded_files,
+                                rename_input,
+                                custom_numbering,
+                                number_position
+                            )
+                            
+                            # Display results
+                            st.subheader("リネーム結果")
+                            for original, new_name in rename_results.items():
+                                st.write(f"{original} → {new_name}")
+                            
+                            # Create and offer zip download
+                            with open('renamed_images.zip', 'wb') as zipf:
+                                shutil.make_archive('renamed_images', 'zip', 'renamed_images')
+                            
+                            with open('renamed_images.zip', 'rb') as f:
+                                st.download_button(
+                                    label="リネーム済み画像をダウンロード",
+                                    data=f.read(),
+                                    file_name='renamed_images.zip',
+                                    mime='application/zip'
+                                )
+                    else:
+                        st.warning("リネーム名を入力してください")
 
     with tab2:
         st.header("📋 定型文管理")
@@ -430,10 +450,9 @@ def main():
         # Display current mappings
         st.subheader("現在のキーワードマッピング")
         if st.session_state.keyword_mapping:
-            mapping_df = st.dataframe(
-                {"元のキーワード": list(st.session_state.keyword_mapping.keys()), 
-                 "マッピングされたキーワード": list(st.session_state.keyword_mapping.values())}
-            )
+            mapping_df = [{"元のキーワード": k, "マッピングされたキーワード": v} 
+                         for k, v in st.session_state.keyword_mapping.items()]
+            st.table(mapping_df)
         else:
             st.write("マッピングはまだ追加されていません")
 
