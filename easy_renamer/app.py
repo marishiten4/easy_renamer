@@ -22,6 +22,9 @@ class EasyRenamer:
             
         if 'metadata_cache' not in st.session_state:
             st.session_state.metadata_cache = {}
+            
+        if 'extracted_keywords' not in st.session_state:
+            st.session_state.extracted_keywords = []
         
         # AI image metadata keywords
         self.ai_image_keywords = [
@@ -37,12 +40,22 @@ class EasyRenamer:
             'big_words': ['キャラクター', '美少女', 'アニメ'],
             'small_words': ['可愛い', '人気', '高品質'],
             'registered_words': [],
-            'metadata_keywords': []
+            'metadata_keywords': [],
+            'keyword_mappings': {
+                'Stable Diffusion': ['AI生成', 'デジタル'],
+                'anime': ['アニメ', '漫画風'],
+                'character': ['キャラクター', '人物'],
+                'portrait': ['ポートレート', '肖像画'],
+                'landscape': ['風景', '自然']
+            }
         }
         
         try:
             with open('settings.json', 'r', encoding='utf-8') as f:
                 st.session_state.settings = json.load(f)
+                # Ensure keyword_mappings exists in loaded settings
+                if 'keyword_mappings' not in st.session_state.settings:
+                    st.session_state.settings['keyword_mappings'] = default_settings['keyword_mappings']
         except FileNotFoundError:
             st.session_state.settings = default_settings
 
@@ -61,6 +74,7 @@ class EasyRenamer:
             return st.session_state.metadata_cache[image_file.name]
         
         keywords = []
+        mapped_keywords = []
         try:
             # Convert to PIL Image object
             image = Image.open(image_file)
@@ -69,23 +83,39 @@ class EasyRenamer:
             param_str = image.info.get('parameters', '')
             if param_str:
                 # Search for AI keywords
-                keywords.extend([
-                    keyword for keyword in self.ai_image_keywords 
-                    if keyword.lower() in param_str.lower()
-                ])
+                for keyword in self.ai_image_keywords:
+                    if keyword.lower() in param_str.lower():
+                        keywords.append(keyword)
                 
                 # Extract custom keywords
                 prompt_match = re.findall(r'\b[A-Za-z]+\b', param_str)
                 keywords.extend(prompt_match[:5])  # Add first 5 keywords
+                
+                # Get mapped keywords from settings
+                for keyword in keywords:
+                    if keyword.lower() in st.session_state.settings['keyword_mappings']:
+                        mapped_keywords.extend(st.session_state.settings['keyword_mappings'][keyword.lower()])
+                    
+                # Also check for partial matches
+                for extracted in keywords:
+                    for mapping_key in st.session_state.settings['keyword_mappings']:
+                        if mapping_key.lower() in extracted.lower():
+                            mapped_keywords.extend(st.session_state.settings['keyword_mappings'][mapping_key])
         
         except Exception as e:
             pass  # Silently handle errors to improve performance
         
         # Cache the results
         unique_keywords = list(set(keywords))  # Remove duplicates
-        st.session_state.metadata_cache[image_file.name] = unique_keywords
+        unique_mapped = list(set(mapped_keywords))  # Remove duplicates
         
-        return unique_keywords
+        result = {
+            'extracted': unique_keywords,
+            'mapped': unique_mapped
+        }
+        
+        st.session_state.metadata_cache[image_file.name] = result
+        return result
 
     def create_word_blocks(self, additional_keywords=None):
         """Create word blocks with drag and drop functionality"""
@@ -127,8 +157,9 @@ class EasyRenamer:
             max-height: 200px;
             overflow-y: auto;
             padding: 10px;
-            border: 1px solid #ddd;
+            border: 1px solid #4169E1;
             border-radius: 5px;
+            background-color: #121212;
         }
         </style>
         <script>
@@ -227,40 +258,97 @@ class EasyRenamer:
             st.success(f"ワード '{word}' を{word_type}に追加しました")
         elif word in st.session_state.settings[word_type]:
             st.warning(f"ワード '{word}' は既に存在します")
+            
+    def add_keyword_mapping(self, keyword, mapped_words):
+        """Add a new keyword mapping"""
+        if not keyword:
+            return False
+            
+        # Split the mapped words by comma
+        mapped_list = [word.strip() for word in mapped_words.split(',') if word.strip()]
+        
+        # Add or update the mapping
+        if keyword.lower() not in st.session_state.settings['keyword_mappings']:
+            st.session_state.settings['keyword_mappings'][keyword.lower()] = mapped_list
+        else:
+            # Update existing mapping
+            st.session_state.settings['keyword_mappings'][keyword.lower()] = mapped_list
+            
+        self.save_settings()
+        return True
 
 def display_image_list(page_files, current_selected=None):
     """Display images in a traditional list view"""
     st.markdown("""
     <style>
     .image-list {
-        border: 1px solid #ddd;
+        border: 1px solid #4169E1;
         border-radius: 5px;
         max-height: 400px;
         overflow-y: auto;
+        background-color: #212121;
+        color: white;
     }
     .image-item {
         padding: 8px;
         margin: 2px;
         cursor: pointer;
-        border-bottom: 1px solid #eee;
+        border-bottom: 1px solid #333;
     }
     .image-item:hover {
-        background-color: #f1f1f1;
+        background-color: #333;
     }
     .image-item.selected {
-        background-color: #e6f7ff;
+        background-color: #4169E1;
         border-left: 3px solid #1890ff;
     }
     </style>
     <script>
     function selectImage(imageName) {
-        const selectBox = document.querySelector('[data-testid="stSelectbox"]');
-        if (selectBox) {
-            // Set value and trigger change event
-            selectBox.value = imageName;
-            selectBox.dispatchEvent(new Event('change', { bubbles: true }));
-        }
+        // Set the selected image name in sessionStorage
+        sessionStorage.setItem('selectedImage', imageName);
+        
+        // Create a custom event to notify the Streamlit app
+        const event = new CustomEvent('imageSelected', { detail: imageName });
+        document.dispatchEvent(event);
+        
+        // Update the UI to show the image as selected
+        const items = document.querySelectorAll('.image-item');
+        items.forEach(item => {
+            if (item.innerText === imageName) {
+                item.classList.add('selected');
+            } else {
+                item.classList.remove('selected');
+            }
+        });
+        
+        // Force a form submission to reload the page with the new selection
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = window.location.href;
+        
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'selectedImage';
+        input.value = imageName;
+        
+        form.appendChild(input);
+        document.body.appendChild(form);
+        form.submit();
     }
+    
+    // Run this when the page loads to restore any selection
+    document.addEventListener('DOMContentLoaded', function() {
+        const selectedImage = sessionStorage.getItem('selectedImage');
+        if (selectedImage) {
+            const items = document.querySelectorAll('.image-item');
+            items.forEach(item => {
+                if (item.innerText === selectedImage) {
+                    item.classList.add('selected');
+                }
+            });
+        }
+    });
     </script>
     """, unsafe_allow_html=True)
     
@@ -286,38 +374,111 @@ def main():
         initial_sidebar_state="collapsed"
     )
     
-    # Improved CSS for performance
+    # Improved CSS for dark theme
     st.markdown("""
     <style>
-    /* Optimize for performance */
+    /* Dark theme for performance */
     .stApp {
-        background-color: #F8F9FA;
+        background-color: #121212;
+        color: #FFFFFF;
     }
     
     /* Improve input field */
     .rename-input-container {
         margin: 15px 0;
         padding: 10px;
-        background-color: #f0f7ff;
+        background-color: #212121;
         border-radius: 5px;
-        border: 1px solid #d0e3ff;
+        border: 1px solid #4169E1;
     }
     
     /* Custom header styles */
     .custom-header {
         font-size: 1.5rem;
-        color: #1E3A8A;
+        color: #FFFFFF;
         margin-bottom: 1rem;
         font-weight: bold;
     }
+    
+    /* Style for inputs */
+    input, select, textarea {
+        background-color: #333 !important;
+        color: white !important;
+        border: 1px solid #4169E1 !important;
+    }
+    
+    /* Style for buttons */
+    button {
+        background-color: #4169E1 !important;
+        color: white !important;
+    }
+    
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        background-color: #212121;
+        border-radius: 5px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        color: #FFFFFF;
+    }
+    
+    /* Results area */
+    .results-container {
+        background-color: #212121 !important;
+        color: white !important;
+        border: 1px solid #4169E1 !important;
+    }
+    
+    /* Image captions */
+    .css-1aehpvj {
+        color: #FFFFFF !important;
+    }
+    
+    /* Add style for image selection */
+    img.selected {
+        border: 3px solid #4169E1;
+    }
     </style>
+    
+    <script>
+    // Helper function to handle image selection
+    function handleImageSelection() {
+        // Check if an image was selected via POST
+        const urlParams = new URLSearchParams(window.location.search);
+        const selectedParam = urlParams.get('selectedImage');
+        
+        if (selectedParam) {
+            sessionStorage.setItem('selectedImage', selectedParam);
+            
+            // Inject the selected image into the selectbox
+            setTimeout(function() {
+                const selectboxes = document.querySelectorAll('[data-testid="stSelectbox"]');
+                selectboxes.forEach(function(selectbox) {
+                    if (selectbox.querySelector('input')) {
+                        // Set the value
+                        const input = selectbox.querySelector('input');
+                        input.value = selectedParam;
+                        
+                        // Trigger change event
+                        const event = new Event('change', { bubbles: true });
+                        input.dispatchEvent(event);
+                    }
+                });
+            }, 500);
+        }
+    }
+    
+    // Run script when page loads
+    document.addEventListener('DOMContentLoaded', handleImageSelection);
+    </script>
     """, unsafe_allow_html=True)
     
     st.title("🖼️ Easy Renamer - 画像リネームツール")
 
     renamer = EasyRenamer()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["リネーム", "定型文管理", "検索ワード管理", "メタデータキーワード管理"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["リネーム", "定型文管理", "検索ワード管理", "メタデータキーワード管理", "キーワードマッピング"])
 
     with tab1:
         st.header("📤 画像アップロード")
@@ -358,6 +519,16 @@ def main():
             end_idx = min(start_idx + page_size, len(st.session_state.uploaded_files))
             page_files = st.session_state.uploaded_files[start_idx:end_idx]
 
+            # Initialize or get selected image
+            if 'selected_image' not in st.session_state and page_files:
+                st.session_state.selected_image = page_files[0].name
+            
+            # Get image name from query params if available
+            query_params = st.experimental_get_query_params()
+            if 'selectedImage' in query_params:
+                selected_image_name = query_params['selectedImage'][0]
+                st.session_state.selected_image = selected_image_name
+
             # Image selection and preview
             col1, col2 = st.columns([4, 6])
             
@@ -367,45 +538,68 @@ def main():
                 # Use traditional list view for images
                 image_names = [f.name for f in page_files]
                 
-                # Hidden selectbox to store current selection (controlled by JS)
+                # Get selected image from session state
                 selected_image_name = st.selectbox(
                     "画像を選択", 
                     image_names,
+                    index=image_names.index(st.session_state.selected_image) if st.session_state.selected_image in image_names else 0,
                     key="image_selector",
                     label_visibility="collapsed"
                 )
+                
+                # Update session state
+                st.session_state.selected_image = selected_image_name
                 
                 # Display traditional list view
                 display_image_list(page_files, selected_image_name)
                 
                 # Find the selected image file
-                selected_image = next(f for f in page_files if f.name == selected_image_name)
+                selected_image = next((f for f in page_files if f.name == selected_image_name), None)
                 
-                # Metadata keywords extraction (with performance optimization)
-                metadata_keywords = renamer.extract_metadata_keywords(selected_image)
-                
-                if metadata_keywords:
-                    st.write("抽出されたキーワード:", ", ".join(metadata_keywords))
-                else:
-                    st.write("キーワードが見つかりませんでした")
+                if selected_image:
+                    # Metadata keywords extraction (with performance optimization)
+                    metadata_result = renamer.extract_metadata_keywords(selected_image)
+                    
+                    # Store the result for use in word blocks
+                    st.session_state.extracted_keywords = metadata_result.get('mapped', [])
+                    
+                    if metadata_result:
+                        col_ex, col_map = st.columns(2)
+                        
+                        with col_ex:
+                            st.write("抽出されたキーワード:")
+                            if metadata_result.get('extracted'):
+                                st.write(", ".join(metadata_result['extracted']))
+                            else:
+                                st.write("なし")
+                                
+                        with col_map:
+                            st.write("マッピングされたキーワード:")
+                            if metadata_result.get('mapped'):
+                                st.write(", ".join(metadata_result['mapped']))
+                            else:
+                                st.write("なし")
+                    else:
+                        st.write("キーワードが見つかりませんでした")
 
             with col2:
                 st.subheader("画像プレビュー")
                 
-                # Cache images for better performance
-                if selected_image_name not in st.session_state.image_cache:
-                    # Load and process image
-                    image = Image.open(selected_image)
-                    img_byte_arr = io.BytesIO()
-                    image.save(img_byte_arr, format=image.format)
-                    st.session_state.image_cache[selected_image_name] = img_byte_arr.getvalue()
-                
-                # Display image with expansion option
-                st.image(
-                    st.session_state.image_cache[selected_image_name], 
-                    caption=selected_image_name, 
-                    use_column_width=True
-                )
+                if selected_image:
+                    # Cache images for better performance
+                    if selected_image_name not in st.session_state.image_cache:
+                        # Load and process image
+                        image = Image.open(selected_image)
+                        img_byte_arr = io.BytesIO()
+                        image.save(img_byte_arr, format=image.format)
+                        st.session_state.image_cache[selected_image_name] = img_byte_arr.getvalue()
+                    
+                    # Display image with expansion option
+                    st.image(
+                        st.session_state.image_cache[selected_image_name], 
+                        caption=selected_image_name, 
+                        use_column_width=True
+                    )
 
             # Rename settings
             st.header("🔢 リネーム設定")
@@ -432,7 +626,7 @@ def main():
             
             # Rename blocks
             st.markdown('<div class="custom-header">📝 リネーム名称</div>', unsafe_allow_html=True)
-            renamer.create_word_blocks(additional_keywords=metadata_keywords)
+            renamer.create_word_blocks(additional_keywords=st.session_state.extracted_keywords)
             
             # Rename input with improved styling
             st.markdown('<div class="rename-input-container">', unsafe_allow_html=True)
@@ -501,10 +695,11 @@ def main():
                         max-height: 200px;
                         overflow-y: auto;
                         padding: 10px;
-                        background-color: #f8f9fa;
+                        background-color: #212121;
                         border-radius: 5px;
-                        border: 1px solid #eaeaea;
+                        border: 1px solid #4169E1;
                         margin-bottom: 15px;
+                        color: white;
                     }
                     </style>
                     """, unsafe_allow_html=True)
@@ -594,9 +789,18 @@ def main():
         for i, word in enumerate(st.session_state.settings['metadata_keywords']):
             with cols[i % 3]:
                 st.write(f"・{word}")
-
-def main_wrapper():
-    main()
-
-if __name__ == "__main__":
-    main_wrapper()
+                
+    with tab5:
+        st.header("🔄 キーワードマッピング")
+        
+        # Add explanation
+        st.write("メタデータから抽出されたキーワードと、表示するワードのマッピングを設定します。")
+        
+        # Add new mapping
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            new_key = st.text_input("キーワード")
+        
+        with col2:
+            new_mapped = st.text_input("マッピングする
