@@ -7,6 +7,9 @@ import base64
 import re
 import shutil
 import io
+import time
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 class EasyRenamer:
     def __init__(self):
@@ -14,19 +17,18 @@ class EasyRenamer:
         if 'settings' not in st.session_state:
             self.load_settings()
         
-        if 'selected_image_index' not in st.session_state:
-            st.session_state.selected_image_index = None
+        if 'image_cache' not in st.session_state:
+            st.session_state.image_cache = {}
             
+        if 'metadata_cache' not in st.session_state:
+            st.session_state.metadata_cache = {}
+        
         # AI image metadata keywords
         self.ai_image_keywords = [
             'Stable Diffusion', 'Prompt', 'Negative prompt', 
             'Steps', 'CFG scale', 'Seed', 'Model', 
             'Characters', 'Style', 'Emotion'
         ]
-        
-        # Metadata keyword mapping
-        if 'keyword_mapping' not in st.session_state:
-            st.session_state.keyword_mapping = {}
 
     def load_settings(self):
         """Load settings file"""
@@ -53,10 +55,12 @@ class EasyRenamer:
             st.error(f"設定の保存中にエラーが発生: {e}")
 
     def extract_metadata_keywords(self, image_file):
-        """Extract metadata keywords from image"""
-        keywords = []
-        param_str = ""
+        """Extract metadata keywords from image with caching support"""
+        # Check if metadata is already cached
+        if image_file.name in st.session_state.metadata_cache:
+            return st.session_state.metadata_cache[image_file.name]
         
+        keywords = []
         try:
             # Convert to PIL Image object
             image = Image.open(image_file)
@@ -71,23 +75,17 @@ class EasyRenamer:
                 ])
                 
                 # Extract custom keywords
-                prompt_keywords = re.findall(r'\b[A-Za-z]+\b', param_str)
-                keywords.extend(prompt_keywords[:5])  # Add first 5 keywords
-                
-                # Check if keywords have mappings
-                mapped_keywords = []
-                for keyword in keywords:
-                    mapped = st.session_state.keyword_mapping.get(keyword.lower())
-                    if mapped:
-                        mapped_keywords.append(mapped)
-                
-                # Add mapped keywords
-                keywords.extend(mapped_keywords)
+                prompt_match = re.findall(r'\b[A-Za-z]+\b', param_str)
+                keywords.extend(prompt_match[:5])  # Add first 5 keywords
         
         except Exception as e:
-            st.warning(f"メタデータ解析中にエラーが発生: {e}")
+            pass  # Silently handle errors to improve performance
         
-        return list(set(keywords)), param_str  # Remove duplicates and return raw metadata
+        # Cache the results
+        unique_keywords = list(set(keywords))  # Remove duplicates
+        st.session_state.metadata_cache[image_file.name] = unique_keywords
+        
+        return unique_keywords
 
     def create_word_blocks(self, additional_keywords=None):
         """Create word blocks with drag and drop functionality"""
@@ -102,22 +100,73 @@ class EasyRenamer:
         # Add metadata keywords
         if additional_keywords:
             all_words.extend(additional_keywords)
+            
+        # Remove duplicates while preserving order
+        all_words = list(dict.fromkeys(all_words))
         
-        # Unique words
-        all_words = list(set(all_words))
+        # Word block HTML/CSS with drag and drop
+        st.markdown("""
+        <style>
+        .word-block {
+            display: inline-block;
+            background-color: #4169E1;  /* Royal Blue */
+            color: white;
+            border: 1px solid #1E90FF;
+            border-radius: 5px;
+            padding: 5px 10px;
+            margin: 5px;
+            cursor: move;
+            font-weight: bold;
+        }
+        #rename-input {
+            width: 100%;
+            font-size: 16px;
+            padding: 10px;
+        }
+        .word-blocks-container {
+            max-height: 200px;
+            overflow-y: auto;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        </style>
+        <script>
+        function allowDrop(ev) {
+            ev.preventDefault();
+        }
+
+        function drag(ev) {
+            ev.dataTransfer.setData("text", ev.target.innerText);
+        }
+
+        function drop(ev) {
+            ev.preventDefault();
+            var data = ev.dataTransfer.getData("text");
+            var input = document.getElementById("rename-input");
+            var startPos = input.selectionStart;
+            var endPos = input.selectionEnd;
+            
+            var currentValue = input.value;
+            var newValue = 
+                currentValue.slice(0, startPos) + 
+                " " + data + " " + 
+                currentValue.slice(endPos);
+            
+            input.value = newValue.replace(/\s+/g, ' ').trim();
+            
+            const event = new Event('input');
+            input.dispatchEvent(event);
+        }
+        </script>
+        """, unsafe_allow_html=True)
+
+        # Display word blocks
+        word_block_html = ""
+        for word in all_words:
+            word_block_html += f'<span class="word-block" draggable="true" ondragstart="drag(event)">{word}</span>'
         
-        # Display as buttons
-        cols = st.columns(4)
-        
-        for i, word in enumerate(all_words):
-            col_idx = i % 4
-            if cols[col_idx].button(word, key=f"word_btn_{i}", use_container_width=True):
-                # Add the word to the input field
-                current_input = st.session_state.get('rename_input', '')
-                if current_input:
-                    st.session_state['rename_input'] = f"{current_input} {word}"
-                else:
-                    st.session_state['rename_input'] = word
+        st.markdown(f'<div class="word-blocks-container" ondrop="drop(event)" ondragover="allowDrop(event)">{word_block_html}</div>', unsafe_allow_html=True)
 
     def rename_files(self, files, base_name, custom_numbering, number_position):
         """
@@ -135,7 +184,9 @@ class EasyRenamer:
         # Create output directory if not exists
         os.makedirs(output_dir, exist_ok=True)
         
-        for idx, uploaded_file in enumerate(files, start=1):
+        # Process files with a thread pool for better performance
+        def process_file(idx_file):
+            idx, uploaded_file = idx_file
             # Generate custom filename with user-defined numbering
             file_ext = os.path.splitext(uploaded_file.name)[1]
             
@@ -154,10 +205,18 @@ class EasyRenamer:
                 # Save file
                 with open(new_filepath, "wb") as f:
                     f.write(uploaded_file.getvalue())
-                results[uploaded_file.name] = new_filename
+                return (uploaded_file.name, new_filename)
             except Exception as e:
-                results[uploaded_file.name] = f"エラー: {str(e)}"
+                return (uploaded_file.name, f"エラー: {str(e)}")
         
+        # Use ThreadPoolExecutor to process files in parallel
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            file_results = executor.map(process_file, enumerate(files, start=1))
+            
+        # Convert results to dictionary
+        for original, new_name in file_results:
+            results[original] = new_name
+            
         return results
 
     def add_word(self, word_type, word):
@@ -169,149 +228,220 @@ class EasyRenamer:
         elif word in st.session_state.settings[word_type]:
             st.warning(f"ワード '{word}' は既に存在します")
 
-    def add_keyword_mapping(self, original_keyword, mapped_keyword):
-        """Add a new keyword mapping"""
-        if original_keyword and mapped_keyword:
-            st.session_state.keyword_mapping[original_keyword.lower()] = mapped_keyword
-            st.success(f"キーワードマッピング: '{original_keyword}' → '{mapped_keyword}' を追加しました")
-        else:
-            st.warning("キーワードとマッピングを両方入力してください")
-
-def main():
-    st.set_page_config(page_title="Easy Renamer", layout="wide")
-    st.title("🖼️ Easy Renamer - 画像リネームツール")
-
-    # Apply custom CSS
+def display_image_list(page_files, current_selected=None):
+    """Display images in a traditional list view"""
     st.markdown("""
     <style>
-    .selected-image {
-        border: 3px solid #4169E1 !important;
-        background-color: #F0F8FF;
-    }
     .image-list {
-        height: 400px;
-        overflow-y: auto;
-        padding: 10px;
-        border: 1px solid #ccc;
+        border: 1px solid #ddd;
         border-radius: 5px;
+        max-height: 400px;
+        overflow-y: auto;
     }
-    .stButton>button {
-        width: 100%;
-        margin-bottom: 5px;
+    .image-item {
+        padding: 8px;
+        margin: 2px;
+        cursor: pointer;
+        border-bottom: 1px solid #eee;
+    }
+    .image-item:hover {
+        background-color: #f1f1f1;
+    }
+    .image-item.selected {
+        background-color: #e6f7ff;
+        border-left: 3px solid #1890ff;
+    }
+    </style>
+    <script>
+    function selectImage(imageName) {
+        const selectBox = document.querySelector('[data-testid="stSelectbox"]');
+        if (selectBox) {
+            // Set value and trigger change event
+            selectBox.value = imageName;
+            selectBox.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    }
+    </script>
+    """, unsafe_allow_html=True)
+    
+    # Start the list container
+    list_html = '<div class="image-list">'
+    
+    # Add each image to the list
+    for file in page_files:
+        is_selected = file.name == current_selected
+        selected_class = "selected" if is_selected else ""
+        list_html += f'<div class="image-item {selected_class}" onclick="selectImage(\'{file.name}\')">{file.name}</div>'
+    
+    # Close the list container
+    list_html += '</div>'
+    
+    # Display the list
+    st.markdown(list_html, unsafe_allow_html=True)
+
+def main():
+    st.set_page_config(
+        page_title="Easy Renamer", 
+        layout="wide", 
+        initial_sidebar_state="collapsed"
+    )
+    
+    # Improved CSS for performance
+    st.markdown("""
+    <style>
+    /* Optimize for performance */
+    .stApp {
+        background-color: #F8F9FA;
+    }
+    
+    /* Improve input field */
+    .rename-input-container {
+        margin: 15px 0;
+        padding: 10px;
+        background-color: #f0f7ff;
+        border-radius: 5px;
+        border: 1px solid #d0e3ff;
+    }
+    
+    /* Custom header styles */
+    .custom-header {
+        font-size: 1.5rem;
+        color: #1E3A8A;
+        margin-bottom: 1rem;
+        font-weight: bold;
     }
     </style>
     """, unsafe_allow_html=True)
+    
+    st.title("🖼️ Easy Renamer - 画像リネームツール")
 
     renamer = EasyRenamer()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["リネーム", "定型文管理", "検索ワード管理", "メタデータキーワード管理", "キーワードマッピング"]
-    )
+    tab1, tab2, tab3, tab4 = st.tabs(["リネーム", "定型文管理", "検索ワード管理", "メタデータキーワード管理"])
 
     with tab1:
         st.header("📤 画像アップロード")
+        
+        # Cache uploaded files to prevent reloading
+        if 'uploaded_files' not in st.session_state:
+            st.session_state.uploaded_files = None
+            
         uploaded_files = st.file_uploader(
             "画像をアップロード (最大2GB/ファイル)", 
             accept_multiple_files=True, 
             type=['png', 'jpg', 'jpeg', 'webp'],
-            help="最大2GBまでの画像をアップロードできます"
+            help="最大2GBまでの画像をアップロードできます",
+            key="file_uploader"
         )
-
+        
         if uploaded_files:
+            st.session_state.uploaded_files = uploaded_files
+
+        if st.session_state.uploaded_files:
             # Pagination for image list
             page_size = 50
-            total_pages = (len(uploaded_files) - 1) // page_size + 1
-            page_number = st.number_input(
-                "ページ", 
-                min_value=1, 
-                max_value=total_pages, 
-                value=1
-            )
+            total_pages = (len(st.session_state.uploaded_files) - 1) // page_size + 1
+            
+            col_page, col_info = st.columns([1, 3])
+            with col_page:
+                page_number = st.number_input(
+                    "ページ", 
+                    min_value=1, 
+                    max_value=total_pages, 
+                    value=1
+                )
+            
+            with col_info:
+                st.info(f"全 {len(st.session_state.uploaded_files)} 枚中 {page_size} 枚を表示中 (全 {total_pages} ページ)")
             
             start_idx = (page_number - 1) * page_size
-            end_idx = start_idx + page_size
-            page_files = uploaded_files[start_idx:end_idx]
+            end_idx = min(start_idx + page_size, len(st.session_state.uploaded_files))
+            page_files = st.session_state.uploaded_files[start_idx:end_idx]
 
-            # Image selection, preview, and renaming in columns
-            col1, col2 = st.columns([1, 2])
+            # Image selection and preview
+            col1, col2 = st.columns([4, 6])
             
             with col1:
                 st.subheader("画像一覧")
                 
-                # Display file list with clickable items
-                st.markdown('<div class="image-list">', unsafe_allow_html=True)
+                # Use traditional list view for images
+                image_names = [f.name for f in page_files]
                 
-                for i, file in enumerate(page_files):
-                    if st.button(file.name, key=f"file_{i}", use_container_width=True):
-                        st.session_state.selected_image_index = i
+                # Hidden selectbox to store current selection (controlled by JS)
+                selected_image_name = st.selectbox(
+                    "画像を選択", 
+                    image_names,
+                    key="image_selector",
+                    label_visibility="collapsed"
+                )
                 
-                st.markdown('</div>', unsafe_allow_html=True)
-            
-            with col2:
-                if st.session_state.selected_image_index is not None and st.session_state.selected_image_index < len(page_files):
-                    selected_image = page_files[st.session_state.selected_image_index]
-                    
-                    # Create columns for metadata and preview
-                    meta_col, preview_col = st.columns([1, 1])
-                    
-                    with meta_col:
-                        st.subheader("メタデータ")
-                        # Extract metadata
-                        metadata_keywords, raw_metadata = renamer.extract_metadata_keywords(selected_image)
-                        
-                        # Display extracted keywords
-                        st.write("抽出されたキーワード:")
-                        for keyword in metadata_keywords:
-                            st.markdown(f"- {keyword}")
-                        
-                        # Display raw metadata
-                        with st.expander("詳細メタデータ"):
-                            st.text(raw_metadata)
-                    
-                    with preview_col:
-                        st.subheader("画像プレビュー")
-                        # Load and display selected image
-                        image = Image.open(selected_image)
-                        
-                        # Create a BytesIO object to display the image
-                        img_byte_arr = io.BytesIO()
-                        image.save(img_byte_arr, format=image.format)
-                        img_byte_arr = img_byte_arr.getvalue()
-                        
-                        # Display image with expansion option
-                        st.image(img_byte_arr, caption=selected_image.name, use_column_width=True)
+                # Display traditional list view
+                display_image_list(page_files, selected_image_name)
+                
+                # Find the selected image file
+                selected_image = next(f for f in page_files if f.name == selected_image_name)
+                
+                # Metadata keywords extraction (with performance optimization)
+                metadata_keywords = renamer.extract_metadata_keywords(selected_image)
+                
+                if metadata_keywords:
+                    st.write("抽出されたキーワード:", ", ".join(metadata_keywords))
                 else:
-                    st.info("左側の一覧から画像を選択してください")
+                    st.write("キーワードが見つかりませんでした")
+
+            with col2:
+                st.subheader("画像プレビュー")
+                
+                # Cache images for better performance
+                if selected_image_name not in st.session_state.image_cache:
+                    # Load and process image
+                    image = Image.open(selected_image)
+                    img_byte_arr = io.BytesIO()
+                    image.save(img_byte_arr, format=image.format)
+                    st.session_state.image_cache[selected_image_name] = img_byte_arr.getvalue()
+                
+                # Display image with expansion option
+                st.image(
+                    st.session_state.image_cache[selected_image_name], 
+                    caption=selected_image_name, 
+                    use_column_width=True
+                )
 
             # Rename settings
             st.header("🔢 リネーム設定")
             
-            # Numbering position selection
-            number_position = st.radio(
-                "連番の位置", 
-                ['prefix', 'suffix'], 
-                format_func=lambda x: '先頭' if x == 'prefix' else '末尾',
-                horizontal=True
-            )
+            # Two columns for settings
+            col_num, col_format = st.columns(2)
             
-            # Customizable numbering input
-            custom_numbering = st.text_input(
-                "連番形式",
-                value="{n:02d}",
-                help="例: {n:02d} (数字2桁), A{n} (文字と数字の組み合わせ)"
-            )
+            with col_num:
+                # Numbering position selection
+                number_position = st.radio(
+                    "連番の位置", 
+                    ['prefix', 'suffix'], 
+                    format_func=lambda x: '先頭' if x == 'prefix' else '末尾',
+                    horizontal=True
+                )
+            
+            with col_format:
+                # Customizable numbering input
+                custom_numbering = st.text_input(
+                    "連番形式",
+                    value="{n:02d}",
+                    help="例: {n:02d} (数字2桁), A{n} (文字と数字の組み合わせ)"
+                )
             
             # Rename blocks
-            st.header("📝 リネーム名称")
-            metadata_kw = metadata_keywords if 'metadata_keywords' in locals() else None
-            renamer.create_word_blocks(additional_keywords=metadata_kw)
+            st.markdown('<div class="custom-header">📝 リネーム名称</div>', unsafe_allow_html=True)
+            renamer.create_word_blocks(additional_keywords=metadata_keywords)
             
-            # Rename input
+            # Rename input with improved styling
+            st.markdown('<div class="rename-input-container">', unsafe_allow_html=True)
             rename_input = st.text_input(
                 "リネーム名を入力", 
                 key="rename_input",
-                help="上のボタンをクリックして単語を挿入できます"
+                help="ワードブロックをドラッグ&ドロップで挿入できます"
             )
+            st.markdown('</div>', unsafe_allow_html=True)
 
             # Character count validation
             char_count = len(rename_input)
@@ -320,101 +450,127 @@ def main():
             else:
                 st.write(f"文字数: {char_count}")
 
-            # Rename processing - Add two buttons for options
-            col1, col2 = st.columns(2)
+            # Rename buttons in two columns for better UI
+            col_rename, col_clear = st.columns([3, 1])
             
-            with col1:
-                if st.button("選択画像をリネーム", type="primary"):
-                    if rename_input:
-                        if st.session_state.selected_image_index is not None:
-                            # Rename only selected image
-                            selected_file = [page_files[st.session_state.selected_image_index]]
-                            rename_results = renamer.rename_files(
-                                selected_file,
-                                rename_input,
-                                custom_numbering,
-                                number_position
-                            )
-                            
-                            # Display results
-                            st.subheader("リネーム結果")
-                            for original, new_name in rename_results.items():
-                                st.write(f"{original} → {new_name}")
-                                
-                            # Create and offer zip download
-                            with open('renamed_images.zip', 'wb') as zipf:
-                                shutil.make_archive('renamed_images', 'zip', 'renamed_images')
-                            
-                            with open('renamed_images.zip', 'rb') as f:
-                                st.download_button(
-                                    label="リネーム済み画像をダウンロード",
-                                    data=f.read(),
-                                    file_name='renamed_images.zip',
-                                    mime='application/zip'
-                                )
-                        else:
-                            st.warning("画像を選択してください")
-                    else:
-                        st.warning("リネーム名を入力してください")
+            with col_rename:
+                rename_button = st.button("画像をリネーム", type="primary", use_container_width=True)
             
-            with col2:
-                if st.button("すべての画像をリネーム", type="secondary"):
-                    if rename_input:
-                        # Confirm with the user
-                        if st.checkbox("一括リネームを確認 (チェックを入れて確定)", key="bulk_confirm"):
-                            # Execute rename process for all files
-                            rename_results = renamer.rename_files(
-                                uploaded_files,
-                                rename_input,
-                                custom_numbering,
-                                number_position
-                            )
-                            
-                            # Display results
-                            st.subheader("リネーム結果")
-                            for original, new_name in rename_results.items():
-                                st.write(f"{original} → {new_name}")
-                            
-                            # Create and offer zip download
-                            with open('renamed_images.zip', 'wb') as zipf:
-                                shutil.make_archive('renamed_images', 'zip', 'renamed_images')
-                            
-                            with open('renamed_images.zip', 'rb') as f:
-                                st.download_button(
-                                    label="リネーム済み画像をダウンロード",
-                                    data=f.read(),
-                                    file_name='renamed_images.zip',
-                                    mime='application/zip'
-                                )
-                    else:
-                        st.warning("リネーム名を入力してください")
+            with col_clear:
+                if st.button("クリア", use_container_width=True):
+                    st.session_state.rename_input = ""
+                    st.experimental_rerun()
 
+            # Rename processing
+            if rename_button:
+                if rename_input:
+                    # Show progress
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    status_text.text("リネーム処理を開始します...")
+                    time.sleep(0.5)  # Small delay for UI feedback
+                    
+                    # Execute rename process
+                    rename_results = renamer.rename_files(
+                        st.session_state.uploaded_files, 
+                        rename_input, 
+                        custom_numbering,
+                        number_position
+                    )
+                    
+                    # Update progress
+                    progress_bar.progress(50)
+                    status_text.text("リネーム処理完了、ZIPファイルを作成中...")
+                    
+                    # Create ZIP file
+                    with open('renamed_images.zip', 'wb') as zipf:
+                        shutil.make_archive('renamed_images', 'zip', 'renamed_images')
+                    
+                    # Complete progress
+                    progress_bar.progress(100)
+                    status_text.text("処理完了！")
+                    
+                    # Display results in scrollable area
+                    st.subheader("リネーム結果")
+                    
+                    # Create scrollable results area
+                    st.markdown("""
+                    <style>
+                    .results-container {
+                        max-height: 200px;
+                        overflow-y: auto;
+                        padding: 10px;
+                        background-color: #f8f9fa;
+                        border-radius: 5px;
+                        border: 1px solid #eaeaea;
+                        margin-bottom: 15px;
+                    }
+                    </style>
+                    """, unsafe_allow_html=True)
+                    
+                    results_html = '<div class="results-container">'
+                    for original, new_name in rename_results.items():
+                        results_html += f"<p>{original} → {new_name}</p>"
+                    results_html += '</div>'
+                    
+                    st.markdown(results_html, unsafe_allow_html=True)
+                    
+                    # Offer zip download
+                    with open('renamed_images.zip', 'rb') as f:
+                        st.download_button(
+                            label="リネーム済み画像をダウンロード",
+                            data=f.read(),
+                            file_name='renamed_images.zip',
+                            mime='application/zip',
+                            use_container_width=True
+                        )
+                else:
+                    st.warning("リネーム名を入力してください")
+
+    # Word management tabs
     with tab2:
         st.header("📋 定型文管理")
         template_words = st.text_input("定型文を追加")
         if st.button("定型文を追加"):
             renamer.add_word('template_texts', template_words)
         
-        st.write("現在の定型文:", st.session_state.settings['template_texts'])
+        # Display current template words with delete option
+        st.subheader("現在の定型文:")
+        
+        # Use columns to display words in a grid
+        cols = st.columns(3)
+        for i, word in enumerate(st.session_state.settings['template_texts']):
+            with cols[i % 3]:
+                st.write(f"・{word}")
 
     with tab3:
         st.header("🔍 検索ワード管理")
         
-        # Big words management
-        st.subheader("大きめワード")
-        big_word = st.text_input("大きめワードを追加")
-        if st.button("大きめワードを追加"):
-            renamer.add_word('big_words', big_word)
+        # Two columns for word management
+        col1, col2 = st.columns(2)
         
-        st.write("現在の大きめワード:", st.session_state.settings['big_words'])
+        with col1:
+            # Big words management
+            st.subheader("大きめワード")
+            big_word = st.text_input("大きめワードを追加")
+            if st.button("大きめワードを追加"):
+                renamer.add_word('big_words', big_word)
+            
+            # Display big words
+            for word in st.session_state.settings['big_words']:
+                st.write(f"・{word}")
         
-        # Small words management
-        st.subheader("小さめワード")
-        small_word = st.text_input("小さめワードを追加")
-        if st.button("小さめワードを追加"):
-            renamer.add_word('small_words', small_word)
-        
-        st.write("現在の小さめワード:", st.session_state.settings['small_words'])
+        with col2:
+            # Small words management
+            st.subheader("小さめワード")
+            small_word = st.text_input("小さめワードを追加")
+            if st.button("小さめワードを追加"):
+                renamer.add_word('small_words', small_word)
+            
+            # Display small words
+            for word in st.session_state.settings['small_words']:
+                st.write(f"・{word}")
 
     with tab4:
         st.header("🏷️ メタデータキーワード管理")
@@ -430,31 +586,14 @@ def main():
             elif metadata_keyword in st.session_state.settings['metadata_keywords']:
                 st.warning(f"メタデータキーワード '{metadata_keyword}' は既に存在します")
         
-        st.write("現在のメタデータキーワード:", st.session_state.settings['metadata_keywords'])
-
-    with tab5:
-        st.header("🔗 キーワードマッピング")
+        # Display metadata keywords in a more compact form
+        st.subheader("現在のメタデータキーワード:")
         
-        # Keyword mapping management
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            original_keyword = st.text_input("元のキーワード (英語)")
-        
-        with col2:
-            mapped_keyword = st.text_input("マッピングするキーワード (日本語)")
-        
-        if st.button("キーワードマッピングを追加"):
-            renamer.add_keyword_mapping(original_keyword, mapped_keyword)
-        
-        # Display current mappings
-        st.subheader("現在のキーワードマッピング")
-        if st.session_state.keyword_mapping:
-            mapping_df = [{"元のキーワード": k, "マッピングされたキーワード": v} 
-                         for k, v in st.session_state.keyword_mapping.items()]
-            st.table(mapping_df)
-        else:
-            st.write("マッピングはまだ追加されていません")
+        # Use columns to display words in a grid
+        cols = st.columns(3)
+        for i, word in enumerate(st.session_state.settings['metadata_keywords']):
+            with cols[i % 3]:
+                st.write(f"・{word}")
 
 def main_wrapper():
     main()
