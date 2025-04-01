@@ -42,7 +42,7 @@ class EasyRenamer:
             'registered_words': [],
             'metadata_keywords': [],
             'keyword_mappings': {
-                'Stable Diffusion': ['AI生成', 'デジタルアート'],
+                'Stable Diffusion': ['AI生成', 'デジタル'],
                 'anime': ['アニメ', '漫画風'],
                 'character': ['キャラクター', '人物'],
                 'portrait': ['ポートレート', '肖像画'],
@@ -76,33 +76,28 @@ class EasyRenamer:
         keywords = []
         mapped_keywords = []
         try:
-            # Get the file bytes
-            file_bytes = image_file.getvalue()
-            
             # Convert to PIL Image object
-            image = Image.open(io.BytesIO(file_bytes))
+            image = Image.open(image_file)
             
-            # Extract keywords from parameter string in the info dictionary
-            param_str = image.info.get('parameters', '')
+            # Try to extract parameters from image info
+            param_str = ""
+            if 'parameters' in image.info:
+                param_str = image.info['parameters']
+            elif 'comment' in image.info:
+                param_str = image.info['comment']
+            elif hasattr(image, '_getexif') and image._getexif():
+                exif = {TAGS.get(k, k): v for k, v in image._getexif().items()}
+                if 'UserComment' in exif:
+                    param_str = str(exif['UserComment'])
+                elif 'ImageDescription' in exif:
+                    param_str = str(exif['ImageDescription'])
             
-            # If parameters not found in standard location, try looking in Exif data
-            if not param_str and hasattr(image, '_getexif') and image._getexif():
-                exif = image._getexif()
-                # Look for comment or user comment fields that might contain metadata
-                for tag_id in exif or {}:
-                    tag = TAGS.get(tag_id, tag_id)
-                    if tag in ['UserComment', 'ImageDescription', 'Comment']:
-                        exif_value = exif[tag_id]
-                        if isinstance(exif_value, str) and len(exif_value) > 10:  # Arbitrary length to filter out non-useful comments
-                            param_str = exif_value
-                            break
-            
-            # Also try to extract from PNG text chunks
-            if not param_str and image.format == 'PNG' and 'text' in image.info:
-                for chunk_key, chunk_value in image.info['text'].items():
-                    if 'prompt' in chunk_key.lower() or 'parameters' in chunk_key.lower():
-                        param_str = chunk_value
-                        break
+            # Convert bytes to string if needed
+            if isinstance(param_str, bytes):
+                try:
+                    param_str = param_str.decode('utf-8', errors='ignore')
+                except:
+                    param_str = str(param_str)
             
             if param_str:
                 # Search for AI keywords
@@ -110,9 +105,13 @@ class EasyRenamer:
                     if keyword.lower() in param_str.lower():
                         keywords.append(keyword)
                 
-                # Extract custom keywords - look for words in the prompt
-                prompt_match = re.findall(r'\b\w+\b', param_str)
+                # Extract custom keywords - look for words and phrases
+                prompt_match = re.findall(r'\b[A-Za-z0-9]+\b', param_str.lower())
                 keywords.extend(prompt_match[:10])  # Add first 10 keywords
+                
+                # Look for Japanese words (hiragana, katakana, kanji)
+                ja_words = re.findall(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]+', param_str)
+                keywords.extend(ja_words[:5])  # Add first 5 Japanese keywords
                 
                 # Get mapped keywords from settings
                 for keyword in keywords:
@@ -120,15 +119,13 @@ class EasyRenamer:
                     if keyword_lower in st.session_state.settings['keyword_mappings']:
                         mapped_keywords.extend(st.session_state.settings['keyword_mappings'][keyword_lower])
                     
-                # Also check for partial matches
-                for extracted in keywords:
-                    extracted_lower = extracted.lower()
+                    # Also check for partial matches
                     for mapping_key in st.session_state.settings['keyword_mappings']:
-                        if mapping_key in extracted_lower:
+                        if mapping_key.lower() in keyword_lower or keyword_lower in mapping_key.lower():
                             mapped_keywords.extend(st.session_state.settings['keyword_mappings'][mapping_key])
-            
+        
         except Exception as e:
-            st.warning(f"メタデータ抽出中にエラーが発生: {str(e)}")
+            st.warning(f"メタデータの抽出中にエラーが発生: {str(e)}")
         
         # Cache the results
         unique_keywords = list(set(keywords))  # Remove duplicates
@@ -143,7 +140,7 @@ class EasyRenamer:
         return result
 
     def create_word_blocks(self, additional_keywords=None):
-        """Create word blocks with drag and drop functionality"""
+        """Create clickable word blocks"""
         # Combine all words
         all_words = (
             st.session_state.settings['template_texts'] + 
@@ -152,14 +149,14 @@ class EasyRenamer:
             st.session_state.settings['metadata_keywords']
         )
         
-        # Add metadata keywords
+        # Add metadata keywords if provided
         if additional_keywords:
             all_words.extend(additional_keywords)
             
         # Remove duplicates while preserving order
         all_words = list(dict.fromkeys(all_words))
         
-        # Word block HTML/CSS with drag and drop
+        # Word block HTML/CSS with click and drag events
         st.markdown("""
         <style>
         .word-block {
@@ -172,9 +169,14 @@ class EasyRenamer:
             margin: 5px;
             cursor: pointer;
             font-weight: bold;
+            transition: transform 0.1s ease-in-out;
         }
         .word-block:hover {
+            transform: scale(1.05);
             background-color: #1E90FF;
+        }
+        .word-block:active {
+            transform: scale(0.95);
         }
         #rename-input {
             width: 100%;
@@ -190,104 +192,81 @@ class EasyRenamer:
             background-color: #121212;
         }
         </style>
-        """, unsafe_allow_html=True)
-
-        # Create JavaScript for drag and drop + click functionality
-        js_code = """
         <script>
-        // Wait for document to be fully loaded
+        // Wait for the page to be fully loaded
         document.addEventListener('DOMContentLoaded', function() {
-            setupWordBlocks();
+            // Add click handler to word blocks
+            attachWordBlockHandlers();
         });
-        
-        // This function will be called when Streamlit reruns
-        function setupWordBlocks() {
-            // Find the rename input field
-            var renameInput = document.querySelector('input[aria-label="リネーム名を入力"]');
+
+        function attachWordBlockHandlers() {
+            const wordBlocks = document.querySelectorAll('.word-block');
+            const renameInput = document.getElementById('rename-input');
+            
             if (!renameInput) {
-                // Try again in a moment if not found
-                setTimeout(setupWordBlocks, 500);
+                // If the input element doesn't exist yet, try again in a moment
+                setTimeout(attachWordBlockHandlers, 300);
                 return;
             }
             
-            // Set up all word blocks
-            var wordBlocks = document.querySelectorAll('.word-block');
-            wordBlocks.forEach(function(block) {
-                // Set up draggable
-                block.setAttribute('draggable', 'true');
-                
-                // Drag events
-                block.addEventListener('dragstart', function(e) {
-                    e.dataTransfer.setData('text/plain', block.innerText);
-                });
-                
-                // Click event to add word to input
+            wordBlocks.forEach(block => {
+                // Add click event
                 block.addEventListener('click', function() {
-                    var currentVal = renameInput.value;
-                    var wordText = block.innerText;
-                    
-                    // Add space if needed
-                    if (currentVal && !currentVal.endsWith(' ')) {
-                        currentVal += ' ';
-                    }
-                    
-                    renameInput.value = currentVal + wordText + ' ';
-                    
-                    // Trigger change event
-                    var event = new Event('input', { bubbles: true });
-                    renameInput.dispatchEvent(event);
-                    
-                    // Focus back on input
-                    renameInput.focus();
+                    const wordText = this.innerText;
+                    insertTextAtCursor(renameInput, " " + wordText + " ");
+                });
+                
+                // Add drag events
+                block.setAttribute('draggable', 'true');
+                block.addEventListener('dragstart', function(event) {
+                    event.dataTransfer.setData("text", this.innerText);
                 });
             });
             
-            // Set up the input as drop target
-            renameInput.addEventListener('dragover', function(e) {
-                e.preventDefault();
+            // Add drop event to the rename input
+            renameInput.addEventListener('dragover', function(event) {
+                event.preventDefault();
             });
             
-            renameInput.addEventListener('drop', function(e) {
-                e.preventDefault();
-                var data = e.dataTransfer.getData('text/plain');
-                
-                // Get cursor position
-                var cursorPos = renameInput.selectionStart;
-                var currentVal = renameInput.value;
-                
-                // Insert at cursor position
-                var newVal = currentVal.substring(0, cursorPos) + data + ' ' + currentVal.substring(cursorPos);
-                renameInput.value = newVal;
-                
-                // Trigger change event
-                var event = new Event('input', { bubbles: true });
-                renameInput.dispatchEvent(event);
-                
-                // Move cursor after inserted text
-                renameInput.selectionStart = cursorPos + data.length + 1;
-                renameInput.selectionEnd = cursorPos + data.length + 1;
+            renameInput.addEventListener('drop', function(event) {
+                event.preventDefault();
+                const data = event.dataTransfer.getData("text");
+                insertTextAtCursor(this, " " + data + " ");
             });
         }
-        
-        // Call setup after each Streamlit rerun
-        if (window.parent) {
-            // Watch for Streamlit rerun
-            const observer = new MutationObserver(function(mutations) {
-                mutations.forEach(function(mutation) {
-                    if (mutation.type === 'childList' && mutation.addedNodes.length) {
-                        setupWordBlocks();
-                    }
-                });
-            });
+
+        function insertTextAtCursor(input, text) {
+            const startPos = input.selectionStart;
+            const endPos = input.selectionEnd;
             
-            // Start observing
-            observer.observe(document.body, { childList: true, subtree: true });
+            const currentValue = input.value;
+            const newValue = 
+                currentValue.slice(0, startPos) + 
+                text + 
+                currentValue.slice(endPos);
+            
+            input.value = newValue.replace(/\\s+/g, ' ').trim();
+            
+            // Update Streamlit's state
+            const event = new Event('input');
+            input.dispatchEvent(event);
+            
+            // Set cursor position after inserted text
+            input.selectionStart = startPos + text.length;
+            input.selectionEnd = startPos + text.length;
+            input.focus();
         }
         
-        // Initial setup
-        setupWordBlocks();
+        // Run the attachment function whenever Streamlit reloads
+        // This ensures the handlers work after each page refresh
+        const observer = new MutationObserver(function(mutations) {
+            attachWordBlockHandlers();
+        });
+        
+        // Start observing the document for changes
+        observer.observe(document, { childList: true, subtree: true });
         </script>
-        """
+        """, unsafe_allow_html=True)
         
         # Display word blocks
         word_block_html = '<div class="word-blocks-container">'
@@ -295,8 +274,7 @@ class EasyRenamer:
             word_block_html += f'<span class="word-block">{word}</span>'
         word_block_html += '</div>'
         
-        # Display the HTML and JavaScript
-        st.markdown(word_block_html + js_code, unsafe_allow_html=True)
+        st.markdown(word_block_html, unsafe_allow_html=True)
 
     def rename_files(self, files, base_name, custom_numbering, number_position):
         """
@@ -324,7 +302,7 @@ class EasyRenamer:
             try:
                 number_str = custom_numbering.format(n=idx)
             except Exception as e:
-                number_str = str(idx)  # Fallback if formatting fails
+                number_str = str(idx)  # Fallback to simple numbering
             
             # Determine filename based on number position
             if number_position == 'prefix':
@@ -379,8 +357,8 @@ class EasyRenamer:
         self.save_settings()
         return True
 
-def display_image_list(files, current_selected=None):
-    """Display images in a clickable list view"""
+def display_image_list(page_files, current_selected=None):
+    """Display images in a traditional list view with improved interactivity"""
     st.markdown("""
     <style>
     .image-list {
@@ -396,6 +374,7 @@ def display_image_list(files, current_selected=None):
         margin: 2px;
         cursor: pointer;
         border-bottom: 1px solid #333;
+        transition: background-color 0.2s ease;
     }
     .image-item:hover {
         background-color: #333;
@@ -405,17 +384,12 @@ def display_image_list(files, current_selected=None):
         border-left: 3px solid #1890ff;
     }
     </style>
-    """, unsafe_allow_html=True)
-    
-    # Create JavaScript for image selection
-    js_code = """
     <script>
-    // Function to select an image
     function selectImage(imageName) {
-        // Update selected state in local storage
-        localStorage.setItem('selectedImage', imageName);
+        // Set the selected image name in sessionStorage
+        sessionStorage.setItem('selectedImage', imageName);
         
-        // Update UI to show selection
+        // Update the UI to show the image as selected
         const items = document.querySelectorAll('.image-item');
         items.forEach(item => {
             if (item.getAttribute('data-name') === imageName) {
@@ -425,18 +399,24 @@ def display_image_list(files, current_selected=None):
             }
         });
         
-        // Update hidden input to trigger form submission
-        const hiddenInput = document.getElementById('selected-image-input');
-        hiddenInput.value = imageName;
+        // Create a new form submission to update the page
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = window.location.href;
         
-        // Submit the form
-        const form = document.getElementById('image-selection-form');
-        form.dispatchEvent(new Event('submit', { cancelable: true }));
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = 'selectedImage';
+        input.value = imageName;
+        
+        form.appendChild(input);
+        document.body.appendChild(form);
+        form.submit();
     }
     
-    // Set initial selection on page load
+    // Run this when the page loads to restore any selection
     document.addEventListener('DOMContentLoaded', function() {
-        const selectedImage = localStorage.getItem('selectedImage');
+        const selectedImage = sessionStorage.getItem('selectedImage');
         if (selectedImage) {
             const items = document.querySelectorAll('.image-item');
             items.forEach(item => {
@@ -447,47 +427,33 @@ def display_image_list(files, current_selected=None):
         }
     });
     </script>
-    """
+    """, unsafe_allow_html=True)
     
-    # Start the list container and add hidden form
-    html = f"""
-    <form id="image-selection-form" action="">
-        <input type="hidden" id="selected-image-input" name="selected_image" value="{current_selected or ''}">
-        <div class="image-list">
-    """
+    # Start the list container
+    list_html = '<div class="image-list">'
     
     # Add each image to the list
-    for file in files:
+    for file in page_files:
         is_selected = file.name == current_selected
         selected_class = "selected" if is_selected else ""
-        html += f'<div class="image-item {selected_class}" data-name="{file.name}" onclick="selectImage(\'{file.name}\')">{file.name}</div>'
+        list_html += f'<div class="image-item {selected_class}" data-name="{file.name}" onclick="selectImage(\'{file.name}\')">{file.name}</div>'
     
-    # Close the list container and form
-    html += """
-        </div>
-    </form>
-    """
+    # Close the list container
+    list_html += '</div>'
     
-    # Display the list and JavaScript
-    st.markdown(html + js_code, unsafe_allow_html=True)
+    # Display the list
+    st.markdown(list_html, unsafe_allow_html=True)
 
-def update_file_numbering_preview(base_name, custom_numbering, number_position):
-    """Update the file numbering preview"""
+def format_preview(numbering_format, position, base_name):
+    """Format a preview of the file naming based on current settings"""
     try:
-        sample_number = 1
-        # Format the number according to the specified format
-        formatted_number = custom_numbering.format(n=sample_number)
-        
-        # Create sample filename
-        if number_position == 'prefix':
-            sample_filename = f"{formatted_number}_{base_name}.jpg"
-        else:  # suffix
-            sample_filename = f"{base_name}_{formatted_number}.jpg"
-            
-        # Display preview
-        return sample_filename
-    except Exception as e:
-        return f"プレビューエラー: {str(e)}"
+        number_str = numbering_format.format(n=1)
+        if position == 'prefix':
+            return f"{number_str}_{base_name}.jpg"
+        else:
+            return f"{base_name}_{number_str}.jpg"
+    except Exception:
+        return "フォーマットエラー"
 
 def main():
     st.set_page_config(
@@ -496,7 +462,7 @@ def main():
         initial_sidebar_state="collapsed"
     )
     
-    # Improved CSS for dark theme
+    # Improved CSS for dark theme and interactivity
     st.markdown("""
     <style>
     /* Dark theme for performance */
@@ -552,31 +518,31 @@ def main():
         border: 1px solid #4169E1 !important;
     }
     
-    /* Preview area */
-    .preview-container {
-        background-color: #212121;
-        border: 1px solid #4169E1;
-        border-radius: 5px;
-        padding: 10px;
-        margin-top: 10px;
-    }
-    
-    /* Drag handle for resize */
-    .st-emotion-cache-13ln5th {
-        resize: vertical;
-        overflow: auto;
-    }
-    
-    /* Make images responsive */
-    img {
-        max-width: 100%;
-        height: auto;
-        border-radius: 5px;
-    }
-    
     /* Image captions */
     .css-1aehpvj {
         color: #FFFFFF !important;
+    }
+    
+    /* Add style for image selection */
+    img.selected {
+        border: 3px solid #4169E1;
+    }
+    
+    /* Format preview */
+    .format-preview {
+        padding: 5px 10px;
+        background-color: #333;
+        border-radius: 5px;
+        margin-top: 5px;
+        font-family: monospace;
+    }
+    
+    /* Improve tooltip styling */
+    [data-tooltip]:hover::before {
+        background-color: #4169E1;
+        color: white;
+        border-radius: 4px;
+        padding: 5px;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -585,7 +551,7 @@ def main():
 
     renamer = EasyRenamer()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["リネーム", "定型文管理", "検索ワード管理", "キーワードマッピング"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["リネーム", "定型文管理", "検索ワード管理", "メタデータキーワード管理", "キーワードマッピング"])
 
     with tab1:
         st.header("📤 画像アップロード")
@@ -626,55 +592,115 @@ def main():
             end_idx = min(start_idx + page_size, len(st.session_state.uploaded_files))
             page_files = st.session_state.uploaded_files[start_idx:end_idx]
 
-            # Get selection from query params or session state
-            query_params = st.experimental_get_query_params()
-            selected_from_form = st.query_params.get("selected_image", None)
-            
-            # Initialize or update selected image
-            if selected_from_form:
-                st.session_state.selected_image = selected_from_form
-            elif 'selected_image' not in st.session_state and page_files:
+            # Initialize or get selected image
+            if 'selected_image' not in st.session_state and page_files:
                 st.session_state.selected_image = page_files[0].name
-                
-            # Layout with side-by-side image list and preview
-            col1, col2 = st.columns([1, 1])
             
-            with col1:
+            # Get image name from query params or form data if available
+            params = st.experimental_get_query_params()
+            if 'selectedImage' in params:
+                st.session_state.selected_image = params['selectedImage'][0]
+            
+            # Check for POST data with selected image
+            try:
+                for key in st.request_form:
+                    if key == 'selectedImage':
+                        st.session_state.selected_image = st.request_form[key]
+            except:
+                pass
+
+            # Create a two-column layout - left for image list/preview, right for rename options
+            col_images, col_rename = st.columns([1, 1])
+            
+            with col_images:
                 st.subheader("画像一覧")
+                
+                # Get image names
+                image_names = [f.name for f in page_files]
+                
+                # Get selected image from session state
+                selected_image_name = st.session_state.selected_image if st.session_state.selected_image in image_names else image_names[0]
+                
                 # Display clickable image list
-                display_image_list(page_files, st.session_state.selected_image)
+                display_image_list(page_files, selected_image_name)
                 
-                # Find selected image file
-                selected_image = next((f for f in page_files if f.name == st.session_state.selected_image), None)
+                # Update session state
+                st.session_state.selected_image = selected_image_name
                 
-                # Extract metadata from selected image
-                metadata_result = {"extracted": [], "mapped": []}
-                if selected_image:
-                    metadata_result = renamer.extract_metadata_keywords(selected_image)
-                    # Store mapped keywords for use in word blocks
-                    st.session_state.extracted_keywords = metadata_result.get('mapped', [])
-            
-            with col2:
+                # Find the selected image file
+                selected_image = next((f for f in page_files if f.name == selected_image_name), None)
+                
                 st.subheader("画像プレビュー")
-                
                 if selected_image:
                     # Cache images for better performance
-                    if st.session_state.selected_image not in st.session_state.image_cache:
+                    if selected_image_name not in st.session_state.image_cache:
                         # Load and process image
                         image = Image.open(selected_image)
                         img_byte_arr = io.BytesIO()
-                        image.save(img_byte_arr, format=image.format)
-                        st.session_state.image_cache[st.session_state.selected_image] = img_byte_arr.getvalue()
+                        image.save(img_byte_arr, format=image.format if image.format else 'JPEG')
+                        st.session_state.image_cache[selected_image_name] = img_byte_arr.getvalue()
                     
                     # Display image
                     st.image(
-                        st.session_state.image_cache[st.session_state.selected_image], 
-                        caption=st.session_state.selected_image, 
+                        st.session_state.image_cache[selected_image_name], 
+                        caption=selected_image_name, 
                         use_column_width=True
                     )
+            
+            with col_rename:
+                # Rename settings
+                st.header("🔢 リネーム設定")
+                
+                # Initialize rename_input in session state if not present
+                if 'rename_input' not in st.session_state:
+                    st.session_state.rename_input = ""
+                
+                # Initialize format settings
+                if 'number_position' not in st.session_state:
+                    st.session_state.number_position = 'suffix'
                     
-                    # Show extracted metadata
-                    with st.expander("メタデータキーワード"):
+                if 'custom_numbering' not in st.session_state:
+                    st.session_state.custom_numbering = "{n:02d}"
+                
+                # Two columns for settings
+                col_num, col_format = st.columns(2)
+                
+                with col_num:
+                    # Numbering position selection
+                    st.session_state.number_position = st.radio(
+                        "連番の位置", 
+                        ['prefix', 'suffix'], 
+                        format_func=lambda x: '先頭' if x == 'prefix' else '末尾',
+                        horizontal=True,
+                        index=0 if st.session_state.number_position == 'prefix' else 1
+                    )
+                
+                with col_format:
+                    # Customizable numbering input
+                    st.session_state.custom_numbering = st.text_input(
+                        "連番形式",
+                        value=st.session_state.custom_numbering,
+                        help="例: {n:02d} (数字2桁), A{n} (文字と数字の組み合わせ)"
+                    )
+                
+                # Show preview of the format
+                st.markdown('<div class="format-preview">' + 
+                           format_preview(st.session_state.custom_numbering, 
+                                         st.session_state.number_position, 
+                                         "ファイル名") + '</div>', 
+                           unsafe_allow_html=True)
+                
+                # Metadata extraction if an image is selected
+                if selected_image:
+                    st.subheader("メタデータキーワード")
+                    
+                    # Extract metadata
+                    metadata_result = renamer.extract_metadata_keywords(selected_image)
+                    
+                    # Store the result for use in word blocks
+                    st.session_state.extracted_keywords = metadata_result.get('mapped', [])
+                    
+                    if metadata_result:
                         col_ex, col_map = st.columns(2)
                         
                         with col_ex:
@@ -690,117 +716,73 @@ def main():
                                 st.write(", ".join(metadata_result['mapped']))
                             else:
                                 st.write("なし")
-            
-            # Rename section - moved below image preview for better workflow
-            st.header("🏷️ リネーム設定")
-            
-            # Word blocks for drag and drop
-            st.markdown('<div class="custom-header">ワードブロック</div>', unsafe_allow_html=True)
-            renamer.create_word_blocks(additional_keywords=st.session_state.extracted_keywords)
-            
-            # Two columns for rename UI
-            col_rename, col_numbering = st.columns([3, 1])
-            
-            with col_rename:
+                    else:
+                        st.warning("メタデータが見つかりませんでした")
+                
+                # Rename blocks
+                st.markdown('<div class="custom-header">📝 リネーム用ワードブロック</div>', unsafe_allow_html=True)
+                renamer.create_word_blocks(additional_keywords=st.session_state.extracted_keywords)
+                
                 # Rename input with improved styling
                 st.markdown('<div class="rename-input-container">', unsafe_allow_html=True)
                 rename_input = st.text_input(
                     "リネーム名を入力", 
                     key="rename_input",
-                    help="ワードブロックをドラッグ&ドロップまたはクリックして挿入できます"
+                    help="ワードブロックをクリックまたはドラッグ&ドロップで挿入できます",
+                    value=st.session_state.rename_input
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
-                
+
                 # Character count validation
                 char_count = len(rename_input)
                 if char_count > 130:
                     st.markdown(f"<span style='color:red'>文字数: {char_count} (130文字を超えています)</span>", unsafe_allow_html=True)
                 else:
                     st.write(f"文字数: {char_count}")
-            
-            with col_numbering:
-                st.subheader("連番設定")
-                
-                # Numbering position selection
-                number_position = st.radio(
-                    "連番の位置", 
-                    ['prefix', 'suffix'], 
-                    format_func=lambda x: '先頭' if x == 'prefix' else '末尾',
-                    horizontal=True,
-                    key="number_position"
-                )
-                
-                # Customizable numbering input
-                custom_numbering = st.text_input(
-                    "連番形式",
-                    value="{n:02d}",
-                    help="例: {n:02d} (数字2桁), A{n} (文字と数字の組み合わせ)",
-                    key="custom_numbering"
-                )
-                
-                # Real-time preview
-                if rename_input:
-                    preview = update_file_numbering_preview(rename_input, custom_numbering, number_position)
-                    st.markdown(f"""
-                    <div class="preview-container">
-                        <strong>ファイル名プレビュー:</strong><br>
-                        {preview}
-                    </div>
-                    """, unsafe_allow_html=True)
-            
-            # Rename buttons
-            col_rename_btn, col_clear = st.columns([3, 1])
-            
-            with col_rename_btn:
-                rename_button = st.button("画像をリネーム", type="primary", use_container_width=True)
-            
-            with col_clear:
-                if st.button("クリア", use_container_width=True):
-                    st.session_state.rename_input = ""
-                    st.experimental_rerun()
 
-            # Rename processing
-            if rename_button:
-                if rename_input:
-                    # Show progress
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    status_text.text("リネーム処理を開始します...")
-                    time.sleep(0.5)  # Small delay for UI feedback
-                    
-                    # Execute rename process
-                    rename_results = renamer.rename_files(
-                        st.session_state.uploaded_files, 
-                        rename_input, 
-                        custom_numbering,
-                        number_position
-                    )
-                    
-                    # Update progress
-                    progress_bar.progress(50)
-                    status_text.text("リネーム処理完了、ZIPファイルを作成中...")
-                    
-                    # Create ZIP file
-                    with open('renamed_images.zip', 'wb') as zipf:
-                        shutil.make_archive('renamed_images', 'zip', 'renamed_images')
-                    
-                    # Complete progress
-                    progress_bar.progress(100)
-                    status_text.text("処理完了！")
-                    
-                    # Display results in scrollable area
-                    st.subheader("リネーム結果")
-                    
-                    # Create scrollable results area
-                    results_html = '<div class="results-container" style="max-height:200px;overflow-y:auto;padding:10px;">'
-                    for original, new_name in rename_results.items():
-                        results_html += f"<p>{original} → {new_name}</p>"
-                    results_html += '</div>'
-                    
-                    st.markdown(results_html, unsafe_allow_html=True)
-                    
-                    # Offer zip download
-                    with open('renamed_images.zip', 'rb') as f:
-                        st.download_button(
-                            label="リネーム済み
+                # Rename buttons in two columns for better UI
+                col_rename, col_clear = st.columns([3, 1])
+                
+                with col_rename:
+                    rename_button = st.button("画像をリネーム", type="primary", use_container_width=True)
+                
+                with col_clear:
+                    if st.button("クリア", use_container_width=True):
+                        st.session_state.rename_input = ""
+                        st.experimental_rerun()
+
+                # Rename processing
+                if rename_button:
+                    if rename_input:
+                        # Show progress
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        status_text.text("リネーム処理を開始します...")
+                        time.sleep(0.5)  # Small delay for UI feedback
+                        
+                        # Execute rename process
+                        rename_results = renamer.rename_files(
+                            st.session_state.uploaded_files, 
+                            rename_input, 
+                            st.session_state.custom_numbering,
+                            st.session_state.number_position
+                        )
+                        
+                        # Update progress
+                        progress_bar.progress(50)
+                        status_text.text("リネーム処理完了、ZIPファイルを作成中...")
+                        
+                        # Create ZIP file
+                        with open('renamed_images.zip', 'wb') as zipf:
+                            shutil.make_archive('renamed_images', 'zip', 'renamed_images')
+                        
+                        # Complete progress
+                        progress_bar.progress(100)
+                        status_text.text("処理完了！")
+                        
+                        # Display results in scrollable area
+                        st.subheader("リネーム結果")
+                        
+                        # Create scrollable results area
+                        results_html = '<div class="results-container" style="max
