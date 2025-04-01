@@ -52,7 +52,7 @@ def main():
 
         if st.session_state.uploaded_files:
             # Create a three-column layout for better organization
-            col_list, col_preview, col_rename = st.columns([1, 1, 1])
+            col_list, col_rename, col_preview = st.columns([1, 1, 1])
             
             # Pagination for image list
             page_size = 50
@@ -87,39 +87,61 @@ def main():
                 # Update session state
                 st.session_state.selected_image = selected_image_name
             
-            # Find the selected image file
-            selected_image = next((f for f in page_files if f.name == selected_image_name), None)
-            
-            with col_preview:
-                st.subheader("画像プレビュー")
+            with col_rename:           
+                # Rename settings
+                st.header("🔢 リネーム設定")
                 
-                if selected_image:
-                    # Initialize image cache if needed
-                    if 'image_cache' not in st.session_state:
-                        st.session_state.image_cache = {}
-                        
-                    # Cache images for better performance
-                    if selected_image_name not in st.session_state.image_cache:
-                        # Load and process image
-                        image = Image.open(selected_image)
-                        img_byte_arr = io.BytesIO()
-                        image.save(img_byte_arr, format=image.format if image.format else 'JPEG')
-                        st.session_state.image_cache[selected_image_name] = img_byte_arr.getvalue()
+                # Initialize rename_input in session state if not present
+                if 'rename_input' not in st.session_state:
+                    st.session_state.rename_input = ""
+                
+                # Initialize format settings
+                if 'number_position' not in st.session_state:
+                    st.session_state.number_position = 'suffix'
                     
-                    # Display image
-                    st.image(
-                        st.session_state.image_cache[selected_image_name], 
-                        caption=selected_image_name, 
-                        use_column_width=True
+                if 'custom_numbering' not in st.session_state:
+                    st.session_state.custom_numbering = "{n:02d}"
+                
+                # Two columns for settings
+                col_num, col_format = st.columns(2)
+                
+                with col_num:
+                    # Numbering position selection
+                    st.session_state.number_position = st.radio(
+                        "連番の位置", 
+                        ['prefix', 'suffix'], 
+                        format_func=lambda x: '先頭' if x == 'prefix' else '末尾',
+                        horizontal=True,
+                        index=0 if st.session_state.number_position == 'prefix' else 1,
+                        key="number_position_radio"
                     )
-                    
-                    # Extract and display metadata
-                    st.subheader("メタデータキーワード")
-                    
-                    # Initialize metadata cache if needed
-                    if 'metadata_cache' not in st.session_state:
-                        st.session_state.metadata_cache = {}
-                    
+                
+                with col_format:
+                    # Customizable numbering input
+                    st.session_state.custom_numbering = st.text_input(
+                        "連番形式",
+                        value=st.session_state.custom_numbering,
+                        help="例: {n:02d} (数字2桁), A{n} (文字と数字の組み合わせ)",
+                        key="custom_numbering_input"
+                    )
+                
+                # Show preview of the format
+                create_format_preview(st.session_state.custom_numbering, 
+                                     st.session_state.number_position, 
+                                     "ファイル名")
+                
+                # Find the selected image file
+                selected_image = next((f for f in st.session_state.uploaded_files if f.name == selected_image_name), None)
+                
+                # Extract and display metadata
+                st.subheader("メタデータキーワード")
+                
+                # Initialize metadata cache if needed
+                if 'metadata_cache' not in st.session_state:
+                    st.session_state.metadata_cache = {}
+                
+                # Extract metadata and mapped keywords
+                if selected_image:
                     # Extract metadata
                     metadata_result = renamer.extract_metadata_keywords(selected_image)
                     
@@ -147,52 +169,11 @@ def main():
                                 st.write("なし")
                     else:
                         st.warning("メタデータが見つかりませんでした")
-            
-            with col_rename:           
-                # Rename settings
-                st.header("🔢 リネーム設定")
-                
-                # Initialize rename_input in session state if not present
-                if 'rename_input' not in st.session_state:
-                    st.session_state.rename_input = ""
-                
-                # Initialize format settings
-                if 'number_position' not in st.session_state:
-                    st.session_state.number_position = 'suffix'
-                    
-                if 'custom_numbering' not in st.session_state:
-                    st.session_state.custom_numbering = "{n:02d}"
-                
-                # Two columns for settings
-                col_num, col_format = st.columns(2)
-                
-                with col_num:
-                    # Numbering position selection
-                    st.session_state.number_position = st.radio(
-                        "連番の位置", 
-                        ['prefix', 'suffix'], 
-                        format_func=lambda x: '先頭' if x == 'prefix' else '末尾',
-                        horizontal=True,
-                        index=0 if st.session_state.number_position == 'prefix' else 1
-                    )
-                
-                with col_format:
-                    # Customizable numbering input
-                    st.session_state.custom_numbering = st.text_input(
-                        "連番形式",
-                        value=st.session_state.custom_numbering,
-                        help="例: {n:02d} (数字2桁), A{n} (文字と数字の組み合わせ)"
-                    )
-                
-                # Show preview of the format
-                create_format_preview(st.session_state.custom_numbering, 
-                                      st.session_state.number_position, 
-                                      "ファイル名")
                 
                 # Rename blocks
                 st.markdown('<div class="custom-header">📝 リネーム用ワードブロック</div>', unsafe_allow_html=True)
                 
-                # Create word blocks with fixed JavaScript functionality
+                # Create word blocks with improved functionality
                 create_word_blocks_component(renamer, st.session_state.extracted_keywords)
                 
                 # Rename input with improved styling
@@ -270,6 +251,32 @@ def main():
                             st.write(f"{original} → {new_name}")
                     else:
                         st.error("リネーム名を入力してください")
+                
+            # Find the selected image file
+            selected_image = next((f for f in st.session_state.uploaded_files if f.name == selected_image_name), None)
+            
+            with col_preview:
+                st.subheader("画像プレビュー")
+                
+                if selected_image:
+                    # Initialize image cache if needed
+                    if 'image_cache' not in st.session_state:
+                        st.session_state.image_cache = {}
+                        
+                    # Cache images for better performance
+                    if selected_image_name not in st.session_state.image_cache:
+                        # Load and process image
+                        image = Image.open(selected_image)
+                        img_byte_arr = io.BytesIO()
+                        image.save(img_byte_arr, format=image.format if image.format else 'JPEG')
+                        st.session_state.image_cache[selected_image_name] = img_byte_arr.getvalue()
+                    
+                    # Display image
+                    st.image(
+                        st.session_state.image_cache[selected_image_name], 
+                        caption=selected_image_name, 
+                        use_column_width=True
+                    )
 
     with tab2:
         st.header("📋 定型文管理")
